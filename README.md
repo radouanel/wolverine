@@ -1,1 +1,1 @@
-# sequence_splitter
+# Wolverine - Scene Splitter
