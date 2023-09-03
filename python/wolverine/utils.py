@@ -1,91 +1,15 @@
-
-import os
-import re
 import json
 import pprint
 import subprocess
-from typing import List
-from shutil import which
 from pathlib import Path
-from tempfile import mkdtemp
-from dataclasses import dataclass
+from shutil import which, copy
+from dataclasses import dataclass, asdict
+from typing import Union, List
+
+from opentimelineio import opentime
 
 from wolverine import log
-
-
-@dataclass
-class ShotData:
-    index: int
-    fps: float
-    source: Path
-    start_time: float
-    duration_time: float
-    start_frame: int
-    end_frame: int = 0
-    duration: int = 0
-    new_start: int = 101
-    new_end: int = 0
-    thumbnail: Path = None
-    movie: Path = None
-
-    def __post_init__(self):
-        if not self.duration and self.duration_time:
-            self.duration = seconds_to_frames(self.duration_time, self.fps)
-        if not self.duration_time and self.duration:
-            self.duration_time = frames_to_seconds(self.duration, self.fps)
-        if not self.end_frame and self.start_frame and self.duration:
-            self.end_frame = self.start_frame + self.duration
-        if not self.new_end and self.new_start and self.duration:
-            self.new_end = self.new_start + self.duration
-
-        self.get_thumbnail()
-        self.get_movie()
-
-    def get_thumbnail(self):
-        if not self.source.exists() or self.source.stat().st_size == 0:
-            log.critical('No source specified or source doesn\'t exist or is empty at : ({self.source})')
-            return
-        thumb_out = Path(mkdtemp()).joinpath(f'SH{(self.index * 10):03d}.jpg')
-        err_msg = f'Could not extract frame from file ({self.source.as_posix()})'
-
-        start_time = frames_to_ffmpeg_timecode(self.start_frame, self.fps)
-        command_list = f'ffmpeg -i "{self.source.as_posix()}" -ss {start_time} -vframes 1 -vsync vfr "{thumb_out.as_posix()}"'
-        # command_list = f'ffmpeg -loglevel quiet -i "{self.source.as_posix()}" -vf "thumbnail={self.start_frame}" -vframes 1 -vsync vfr "{thumb_out.as_posix()}"'
-        log.debug(f'Running Thumbnail Command : {command_list}')
-        try:
-            subprocess.check_output(command_list, shell=True)
-        except subprocess.CalledProcessError:
-            log.critical(err_msg)
-            return
-
-        if not thumb_out.exists() or thumb_out.stat().st_size == 0:
-            log.critical(err_msg)
-        self.thumbnail = thumb_out
-
-    def get_movie(self):
-        if not self.source.exists() or self.source.stat().st_size == 0:
-            log.critical('No source specified or source doesn\'t exist or is empty at : ({self.source})')
-            return
-        shot_out = Path(mkdtemp()).joinpath(f'SH{(self.index * 10):03d}{self.source.suffix}')
-        start_time = frames_to_ffmpeg_timecode(self.start_frame, self.fps)
-        duration_time = frames_to_ffmpeg_timecode(self.duration, self.fps)
-        err_msg = f'Could not extract shot from file ({self.source.as_posix()})'
-        command_list = ['ffmpeg',
-                        f'-i "{self.source.as_posix()}"',
-                        f'-ss {start_time} -t {duration_time}',
-                        f'-c:v copy -c:a copy -vsync vfr {shot_out.as_posix()}']
-        # command_list = f'ffmpeg -loglevel quiet -i "{self.source.as_posix()}" -ss {start_time} -vframes {self.duration} -vsync vfr {shot_out.as_posix()}'
-        log.debug(f'Running Movie Extract Command : {command_list}')
-        try:
-            # subprocess.check_output(' '.join(command_list), shell=True)
-            subprocess.check_output(command_list, shell=True)
-        except subprocess.CalledProcessError:
-            log.critical(err_msg)
-            return
-
-        if not shot_out.exists() or shot_out.stat().st_size == 0:
-            log.critical(err_msg)
-        self.movie = shot_out
+from wolverine.shots import ShotData
 
 
 @dataclass
@@ -96,10 +20,19 @@ class FFProbe:
     fps: float
     duration: float
     frames: int
-    shots: List[ShotData]
+
+    def as_dict(self):
+        probe = asdict(self)
+        probe['source'] = self.source.as_posix()
+        return probe
+
+    @staticmethod
+    def from_dict(values):
+        values['source'] = Path(values['source'])
+        return FFProbe(**values)
 
 
-def probe_file(file_path, detection_threshold=20, print_stats=False):
+def probe_file(file_path, print_stats=False):
     file_path = Path(file_path)
     ffprobe_path = 'ffprobe'
     if not which('ffprobe'):
@@ -143,12 +76,12 @@ def probe_file(file_path, detection_threshold=20, print_stats=False):
     duration_timecode = extra_data.get('duration') or video_data.get('duration', 0) or video_data.get('tags', {}).get('DURATION', 0)
     duration = 0.0
     if duration_timecode and fps:
-        duration = ffmpeg_duration_to_seconds(duration_timecode)
+        duration = opentime.to_seconds(opentime.from_time_string(duration_timecode, fps))
     frames = 0
     if video_data.get('nb_frames', 0):
         frames = int(video_data.get('nb_frames', 0))
     elif duration and fps:
-        frames = seconds_to_frames(duration, fps)
+        frames = opentime.to_frames(opentime.from_seconds(duration, fps))
     if not duration and frames and fps:
         duration = frames / fps
     if not frames and fps and duration:
@@ -159,14 +92,10 @@ def probe_file(file_path, detection_threshold=20, print_stats=False):
         'resolution': None,
         'fps': fps,
         'duration': duration,
-        'frames': frames,
-        'shots': []
+        'frames': frames
     }
     if video_data.get('width') and video_data.get('height'):
         res['resolution'] = (video_data.get('width'), video_data.get('height'))
-    shots_data = probe_file_shots(file_path, fps, frames, detection_threshold=detection_threshold)
-    if shots_data:
-        res['shots'] = shots_data
     res = FFProbe(**res)
     if print_stats:
         log.debug(f'Probing parsed data for ({file_path.name}) is :')
@@ -205,11 +134,11 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
                           or 0)
         shot_starts.append((start_time, start_frame))
     for i, (start_time, start_frame) in enumerate(shot_starts):
-        i = (i + 1)
+        i = int(i + 1)
         if i < len(shot_starts):
             next_start_time, next_start_frame = shot_starts[i]
         else:
-            next_start_time = frames_to_seconds(nb_frames, fps)
+            next_start_time = opentime.to_seconds(opentime.from_frames(nb_frames, fps))
             next_start_frame = nb_frames
         shot_data = ShotData(
             index=i,
@@ -224,88 +153,14 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
     return shots_data
 
 
-def frames_to_seconds(frames, fps):
-    return frames / fps
-
-
-def timecode_to_seconds(seconds, fps):
-    _zip_ft = zip((3600, 60, 1, 1 / fps), seconds.split(':'))
-    return sum(f * float(t) for f, t in _zip_ft)
-
-
-def _seconds(value, fps):
-    # timecode/frame conversion courtesy of https://stackoverflow.com/a/34607115
-    if isinstance(value, str):  # value seems to be a timestamp
-        return timecode_to_seconds(value, fps)
-    elif isinstance(value, (int, float)):  # frames
-        return frames_to_seconds(value, fps)
-    else:
-        return 0
-
-
-def seconds_to_timecode(seconds, fps):
-    seconds = float(seconds)
-    return (f'{int(seconds / 3600):02d}:'
-            f'{int(seconds / 60 % 60):02d}:'
-            f'{int(seconds % 60):02d}:'
-            f'{round((seconds - int(seconds)) * fps):02d}')
-
-
-def seconds_to_ffmpeg_timecode(seconds):
-    if seconds < 60.0:
-        return "00:00:" + '{:05.2f}'.format(seconds)
-    else:
-        milliseconds = seconds - float(int(seconds))
-        total_seconds = int(seconds - milliseconds)
-        seconds = total_seconds % 60
-        total_minutes = int((total_seconds - seconds)/60.0)
-        minutes = int(total_minutes % 60.0)
-        hours = int((total_minutes-minutes)/60.0)
-        return "%s:%s:%s" % ('{:02}'.format(hours), '{:02}'.format(hours), '{:05.2f}'.format(seconds + milliseconds))
-
-
-def seconds_to_frames(seconds, fps):
-    return int(float(seconds) * float(fps))
-
-
-def timecode_to_frames(timecode, fps, start=None):
-    return seconds_to_frames(_seconds(timecode, fps) - _seconds(start, fps), fps)
-
-
-def frames_to_timecode(frames, fps, start=None):
-    seconds = _seconds(frames, fps) + _seconds(start, fps)
-    return seconds_to_timecode(seconds, fps)
-
-
-def frames_to_ffmpeg_timecode(frames, fps, start=None):
-    seconds = _seconds(frames, fps) + _seconds(start, fps)
-    return seconds_to_ffmpeg_timecode(seconds)
-
-
-def ffmpeg_duration_to_seconds(duration):
-    """
-    Converts an ffmpeg duration string into a decimal representing the number of seconds
-    represented by the duration string; None if the string is not parsable.
-    """
-    pattern = r'^((((?P<hms_grp1>\d*):)?((?P<hms_grp2>\d*):)?((?P<hms_secs>\d+([.]\d*)?)))|' \
-              '((?P<smu_value>\d+([.]\d*)?)(?P<smu_units>s|ms|us)))$'
-    match = re.match(pattern, str(duration))
-    if not match:
-        return
-
-    groups = match.groupdict()
-    if groups['hms_secs'] is not None:
-        value = float(groups['hms_secs'])
-        if groups['hms_grp2'] is not None:
-            value += int(groups['hms_grp1']) * 60 * 60 + int(groups['hms_grp2']) * 60
-        elif groups['hms_grp1'] is not None:
-            value += int(groups['hms_grp1']) * 60
-    else:
-        value = float(groups['smu_value'])
-        units = groups['smu_units']
-        if units == 'ms':
-            value /= 1000.0
-        elif units == 'us':
-            value /= 1000000.0
-    return value
+def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    for shot_data in shot_list:
+        if not shot_data.thumbnail or not shot_data.thumbnail.exists():
+            shot_data.get_thumbnail()
+        if not shot_data.movie or not shot_data.movie.exists():
+            shot_data.get_movie()
+        copy(shot_data.thumbnail, Path(output_path).joinpath(shot_data.thumbnail.name))
+        copy(shot_data.movie, Path(output_path).joinpath(shot_data.movie.name))
 

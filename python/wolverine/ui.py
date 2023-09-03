@@ -1,108 +1,47 @@
 
 import sys
 from pathlib import Path
-from math import ceil, floor
-from typing import Union, List
+from typing import Union, List, Tuple
 
 import mpv
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
-from superqt import QRangeSlider, QLabeledSlider
+from superqt import QLabeledRangeSlider, QLabeledSlider
+from opentimelineio import opentime
 
+from wolverine import shots
 from wolverine import utils
-
+from wolverine.ui_utils import ONE_BILLION, ClickableSlider, ClickableRangeSlider, OTIOViewWidget
 
 VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
-ONE_BILLION = 10**9  # type: int
 
-# TODO use timecode module !
-# TODO get split data from ffmpeg
-# TODO split shots
+
+# TODO override opentimelineview's UI
+# TODO convert our markers/shotData to an OTIO Timeline/Stack/Track(s)/Clips/Markers, when updating a shot, update the ShotData which will in turn update the OTIO clip
+# TODO update next/prev shots if a shot range is updated
+
+# TODO export thumbnails, movies, edl, xml, otio, excel, audio of shots as wav/mp3
 # TODO show video info in a widget (fps, frames, duration, resolution)
-# FIXME prev/next frame sometimes stuck between frames
+
+# TODO use timecode module ! actually better to just use otio for this as well [v]
+# TODO add parent sequence selection
+# TODO add ignored shot option in UI
+# TODO (maybe let's not handle audio at first ?) each ShotData should be able to hold a video and multiple audio OTIO tracks/clips
+
+# TODO in shots panel, allow for a different shot start (other than 101)
+# TODO add button `Add Marker` which adds marker at current frame
+# TODO update shots thumbnail/video in background
+# TODO add progress bar
+# TODO play shot movie when hovering over thumbnail
+# TODO add colors to shots/shot markers
+# TODO add unit tests
+
 # FIXME keyboard shortcuts get overriden by dialog
-# TODO add marker timeline zoom slider (use QRangeSlider with two handles)
-
-
-def pixel_pos_to_range_val(widget: QtWidgets.QWidget, pos: int):
-    # more accurate than superqts same function
-    opt = QtWidgets.QStyleOptionSlider()
-    widget.initStyleOption(opt)
-    gr = widget.style().subControlRect(QtWidgets.QStyle.CC_Slider, opt, QtWidgets.QStyle.SC_SliderGroove, widget)
-    sr = widget.style().subControlRect(QtWidgets.QStyle.CC_Slider, opt, QtWidgets.QStyle.SC_SliderHandle, widget)
-
-    if widget.orientation() == QtCore.Qt.Horizontal:
-        slider_length = sr.width()
-        slider_min = gr.x()
-        slider_max = gr.right() - slider_length + 1
-    else:
-        slider_length = sr.height()
-        slider_min = gr.y()
-        slider_max = gr.bottom() - slider_length + 1
-    pr = pos - sr.center() + sr.topLeft()
-    p = pr.x() if widget.orientation() == QtCore.Qt.Horizontal else pr.y()
-    return QtWidgets.QStyle.sliderValueFromPosition(widget.minimum(), widget.maximum(), p - slider_min,
-                                                    slider_max - slider_min, opt.upsideDown)
-
-
-class ClickableSlider(QtWidgets.QSlider):
-
-    def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton:
-            val = pixel_pos_to_range_val(self, event.pos())
-            self.setValue(val)
-        super(ClickableSlider, self).mousePressEvent(event)
-
-
-class ClickableRangeSlider(QRangeSlider):
-
-    handleSelected = QtCore.Signal(int)
-    handleAdded = QtCore.Signal(int)
-    handleRemoved = QtCore.Signal(int)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._last_value = self.value()
-
-    def mousePressEvent(self, event):
-        self._last_value = self.value()
-        super(ClickableRangeSlider, self).mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        super(ClickableRangeSlider, self).mousePressEvent(event)
-        if event.button() != QtCore.Qt.LeftButton:
-            return
-        modifiers = QtWidgets.QApplication.keyboardModifiers()
-        if modifiers not in (QtCore.Qt.ControlModifier, QtCore.Qt.ShiftModifier):
-            return
-        val = pixel_pos_to_range_val(self, event.pos())
-        new_value = self._last_value
-        if modifiers == QtCore.Qt.ControlModifier:
-            new_value = sorted(set(list(self._last_value) + [val]))
-            self.handleAdded.emit(val)
-        elif modifiers == QtCore.Qt.ShiftModifier:
-            if len(self.value()) == 1:  # leave at least one marker
-                QtWidgets.QMessageBox.critical(self, 'Timeline Markers Error',
-                                               'At least one marker needs to be specified')
-                return
-            # account for user error, they might click close to the handle but not directly on it
-            error_margin = self.maximum() * 0.01   # error margin is 1%
-            error_margin = ceil(error_margin) if error_margin < 1.0 else floor(error_margin)
-            closest_values = [v for v in self._last_value if (val-error_margin) <= v <= (val+error_margin)]
-            if closest_values:
-                new_value = list(self._last_value)
-                new_value.remove(min(closest_values))
-                new_value = sorted(set(new_value))
-                self.handleRemoved.emit(min(closest_values))
-        self.setValue(new_value)
-
-    def mouseDoubleClickEvent(self, event):
-        val = pixel_pos_to_range_val(self, event.pos())
-        self.handleSelected.emit(val)
+# FIXME prev/next frame sometimes stuck between frames
 
 
 class ShotWidget(QtWidgets.QWidget):
 
-    def __init__(self, parent: QtWidgets.QWidget = None, shot_data: utils.ShotData = None):
+    def __init__(self, parent: QtWidgets.QWidget = None, shot_data: shots.ShotData = None):
         super().__init__(parent=parent)
 
         self._shot_data = shot_data
@@ -184,7 +123,7 @@ class ShotListWidget(QtWidgets.QWidget):
         self.setMinimumWidth(450)
         # self.setMaximumWidth(450)
 
-    def refresh_shots(self, shot_list: List[utils.ShotData]):
+    def refresh_shots(self, shot_list: List[shots.ShotData]):
         """
         Refresh list of camera widgets based on sequence/shots cameras
 
@@ -195,7 +134,7 @@ class ShotListWidget(QtWidgets.QWidget):
         if not shot_list:
             return self.shot_widgets
 
-        for shot_data in sorted(self._shot_list, key=lambda x: str(x.index)):
+        for shot_data in sorted(self._shot_list, key=lambda x: str(f'{x.index:06d}')):
             cam_widget = ShotWidget(parent=self, shot_data=shot_data)
             self.shot_widgets.append(cam_widget)
             self._shot_list_lw.layout().addWidget(cam_widget)
@@ -210,10 +149,10 @@ class WolverineUI(QtWidgets.QDialog):
         super().__init__(parent=parent)
         self.setWindowTitle('Wolverine - Sequence Splitter')
 
-        self.shots = []
-        self._full_screen = False
-        self._last_pause_state = True
-        self._probe_data: utils.FFProbe = None
+        self.shots: List[shots.ShotData] = []
+        self._full_screen: bool = False
+        self._last_pause_state: bool = True
+        self._probe_data: Union[utils.FFProbe, None] = None
 
         self._build_ui()
         self._connect_ui()
@@ -247,30 +186,21 @@ class WolverineUI(QtWidgets.QDialog):
         # edl_clip = list(edl.each_clip())
         # start, duration = edl_clip.source_range
 
-        self.installEventFilter(self)
+        # self.installEventFilter(self)
 
     def _build_ui(self):
         self._src_file_le = QtWidgets.QLineEdit()
         self._src_file_le.setReadOnly(True)
-        self._browse_pb = QtWidgets.QPushButton('Select Map File')
+        self._browse_src_pb = QtWidgets.QPushButton('Select Map File')
         self._threshold_sp = QtWidgets.QSpinBox()
         self._threshold_sp.wheelEvent = lambda event: None
         self._threshold_sp.setEnabled(False)
         self._threshold_sp.setRange(0, 100)
-        self._threshold_sp.setValue(25)
+        self._threshold_sp.setValue(80)
         self._process_pb = QtWidgets.QPushButton('Process')
         self._process_pb.setEnabled(False)
         self._screen = QtWidgets.QFrame()
         self._screen.setMinimumSize(450, 450)
-        self._timeline_sl = ClickableSlider(QtCore.Qt.Horizontal)
-        self._timeline_sl.setEnabled(False)
-        self._marker_timeline_sl = ClickableRangeSlider(QtCore.Qt.Orientation.Horizontal)
-        self._marker_timeline_sl.setEnabled(False)
-        self._zoom_timeline_sl = QRangeSlider(QtCore.Qt.Orientation.Horizontal)
-        self._zoom_timeline_sl.setEnabled(False)
-        self._current_frame_sp = QtWidgets.QSpinBox()
-        self._current_frame_sp.wheelEvent = lambda event: None
-        self._current_frame_sp.setEnabled(False)
         self._loop_pb = QtWidgets.QPushButton('L')
         self._speed_sl = QLabeledSlider(QtCore.Qt.Orientation.Horizontal)
         self._speed_sl.setRange(1, 100)
@@ -286,6 +216,19 @@ class WolverineUI(QtWidgets.QDialog):
         self._volume_sl.setRange(0, 100)
         self._volume_sl.setValue(100)
         self._fullscreen_pb = QtWidgets.QPushButton('F')
+        self._timeline_sl = ClickableSlider(QtCore.Qt.Horizontal)
+        self._timeline_sl.setEnabled(False)
+        self._current_frame_sp = QtWidgets.QSpinBox()
+        self._current_frame_sp.wheelEvent = lambda event: None
+        self._current_frame_sp.setEnabled(False)
+        self._zoom_timeline_sl = QLabeledRangeSlider(QtCore.Qt.Orientation.Horizontal)
+        self._zoom_timeline_sl.setEnabled(False)
+        self._marker_timeline_sl = ClickableRangeSlider(QtCore.Qt.Orientation.Horizontal)
+        self._marker_timeline_sl.setEnabled(False)
+        self._dst_dir_le = QtWidgets.QLineEdit()
+        self._browse_dst_pb = QtWidgets.QPushButton('Browse Destination')
+        self._import_pb = QtWidgets.QPushButton('Import')
+        self._export_pb = QtWidgets.QPushButton('Export')
         self._shots_panel_lw = ShotListWidget()
 
         self._player_controls_w = QtWidgets.QWidget()
@@ -304,22 +247,38 @@ class WolverineUI(QtWidgets.QDialog):
         self._player_controls_w.setLayout(controls_lay)
         self._player_controls_w.setEnabled(False)
 
+        screen_ctrl_lay = QtWidgets.QVBoxLayout()
+        screen_ctrl_lay.addWidget(self._screen)
+        screen_ctrl_lay.addWidget(self._player_controls_w)
+        self._player_widget = QtWidgets.QWidget()
+        player_widget_lay = QtWidgets.QHBoxLayout(self._player_widget)
+        player_widget_lay.addLayout(screen_ctrl_lay)
+        player_widget_lay.addItem(QtWidgets.QSpacerItem(10, 40, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding))
+
+        edl_path = Path(r'C:\Users\rlahmidi\Desktop\TFTSet10_ANC_Full_230728_shotnumbers.edl')
+        self._otio_view = OTIOViewWidget(parent=self)
+        self._otio_view.load(edl_path.as_posix())
+
         layout = QtWidgets.QGridLayout()
         layout.addWidget(self._src_file_le, 0, 0, 1, 1)
-        layout.addWidget(self._browse_pb, 0, 1, 1, 1)
+        layout.addWidget(self._browse_src_pb, 0, 1, 1, 1)
         layout.addWidget(self._threshold_sp, 0, 2, 1, 1)
         layout.addWidget(self._process_pb, 0, 3, 1, 1)
-        layout.addWidget(self._screen, 1, 0, 1, 4)
-        layout.addWidget(self._player_controls_w, 2, 0, 1, 4)
+        layout.addWidget(self._player_widget, 1, 0, 2, 4)
         layout.addWidget(self._timeline_sl, 3, 0, 1, 3)
         layout.addWidget(self._current_frame_sp, 3, 3, 1, 1)
         layout.addWidget(self._zoom_timeline_sl, 4, 0, 1, 3)
         layout.addWidget(self._marker_timeline_sl, 5, 0, 1, 3)
-        layout.addWidget(self._shots_panel_lw, 1, 5, 4, 3)
+        layout.addWidget(self._shots_panel_lw, 1, 4, 5, 3)
+        layout.addWidget(self._dst_dir_le, 6, 0, 1, 4)
+        layout.addWidget(self._browse_dst_pb, 6, 4, 1, 1)
+        layout.addWidget(self._export_pb, 6, 5, 1, 1)
+        layout.addWidget(self._import_pb, 6, 6, 1, 1)
+        layout.addWidget(self._otio_view, 7, 0, 1, 4)
         self.setLayout(layout)
 
     def _connect_ui(self):
-        self._browse_pb.clicked.connect(self._browse_video)
+        self._browse_src_pb.clicked.connect(self._browse_video)
         self._src_file_le.editingFinished.connect(self._video_selected)
         self._process_pb.clicked.connect(self._process_video)
         self._loop_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_L))
@@ -335,8 +294,10 @@ class WolverineUI(QtWidgets.QDialog):
         self._fullscreen_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_F))
         self._timeline_sl.sliderPressed.connect(lambda: self._pause_player(True))
         self._timeline_sl.sliderReleased.connect(self._timeline_seek)
-        self._zoom_timeline_sl.sliderReleased.connect(self.update_timeline_focus)
+        self._zoom_timeline_sl.sliderReleased.connect(lambda: self._update_timeline_focus())
         self._marker_timeline_sl.handleSelected.connect(self._timeline_seek)
+        self._browse_dst_pb.clicked.connect(self._browse_output)
+        self._export_pb.clicked.connect(self._export_all)
 
     def eventFilter(self, source, event):
         # print('*'*50)
@@ -383,12 +344,14 @@ class WolverineUI(QtWidgets.QDialog):
         video_path = Path(self._src_file_le.text())
         if not self._player or not video_path.exists():
             return
-        self._probe_data = utils.probe_file(video_path, detection_threshold=self._threshold_sp.value())
-        if not self._probe_data.shots:
+        self._probe_data = utils.probe_file(video_path)
+        self.shots = utils.probe_file_shots(video_path, self._probe_data.fps, self._probe_data.frames,
+                                            detection_threshold=self._threshold_sp.value())
+        if not self.shots:
             QtWidgets.QMessageBox.critical(self, 'Detection Error', 'Could not detect any shots in provided video !')
             return
         import pprint
-        pprint.pprint(self._probe_data.shots)
+        pprint.pprint(self.shots)
 
         frame_range = (1, self._probe_data.frames)
         self._current_frame_sp.blockSignals(True)
@@ -398,9 +361,9 @@ class WolverineUI(QtWidgets.QDialog):
             slider.setTickInterval(1)
             slider.setRange(*frame_range)
         self._zoom_timeline_sl.setValue(frame_range)
-        markers = [s.start_frame for s in self._probe_data.shots]
+        markers = [s.start_frame for s in self.shots]
         self._marker_timeline_sl.setValue(markers)
-        self._shots_panel_lw.refresh_shots(self._probe_data.shots)
+        self._shots_panel_lw.refresh_shots(self.shots)
 
         for slider in [self._current_frame_sp, self._timeline_sl, self._zoom_timeline_sl, self._marker_timeline_sl]:
             slider.setEnabled(True)
@@ -410,9 +373,22 @@ class WolverineUI(QtWidgets.QDialog):
         self._player.loadfile(video_path.as_posix())
         self._player.pause = True
 
-    def update_timeline_focus(self):
-        start, end = self._zoom_timeline_sl.value()
-        markers = [s.start_frame for s in self._probe_data.shots if s.start_frame >= start and s.end_frame <= end]
+    def _browse_output(self):
+        last_directory = Path(self._dst_dir_le.text())
+        output_path = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Output Directory',
+                                                                 last_directory.as_posix(),
+                                                                 QtWidgets.QFileDialog.ShowDirsOnly)
+        self._dst_dir_le.setText(output_path)
+
+    def _export_all(self):
+        if not self._dst_dir_le.text():
+            QtWidgets.QMessageBox.critical(self, 'Output Error', 'No Output Directory Selected !')
+            return
+        utils.export_shots(self._dst_dir_le.text(), self.shots)
+
+    def _update_timeline_focus(self, new_range: Tuple[int, int] = None):
+        start, end = new_range or self._zoom_timeline_sl.value()
+        markers = [s.start_frame for s in self.shots if s.start_frame >= start and s.end_frame <= end]
         current_frame = self._current_frame_sp.value()
         if not (start <= current_frame <= end):
             self._current_frame_sp.setValue(start if current_frame < start else end)
@@ -423,7 +399,7 @@ class WolverineUI(QtWidgets.QDialog):
     def _time_observer(self, value: float):
         if not self._probe_data or not value:
             return
-        current_frame = utils.seconds_to_frames(value, self._probe_data.fps)
+        current_frame = opentime.to_frames(opentime.from_seconds(value, self._probe_data.fps))
         self._timeline_sl.setValue(int(current_frame))
         self._current_frame_sp.setValue(int(current_frame))
         QtWidgets.QApplication.processEvents()
@@ -432,7 +408,8 @@ class WolverineUI(QtWidgets.QDialog):
         if not self._probe_data:
             return
         value = value if isinstance(value, (int, float)) else self._timeline_sl.value()
-        self._player.seek(utils.frames_to_seconds(value, self._probe_data.fps), reference='absolute+exact')
+        value_seconds = opentime.to_seconds(opentime.from_frames(value, self._probe_data.fps))
+        self._player.seek(value_seconds, reference='absolute+exact')
         self._player.pause = self._last_pause_state
 
     def _pause_player(self, status: bool):
