@@ -305,7 +305,8 @@ class WolverineUI(QtWidgets.QDialog):
         self._otio_view.ruler_moved.connect(self._timeline_seek)
         self._otio_view.ruler_released.connect(self._timeline_seek)
         self._otio_view.marker_added.connect(lambda x: print('marker_added ==> ', x))
-        self._otio_view.marker_removed.connect(lambda x: print('marker_removed ==> ', x))
+        self._otio_view.marker_moved.connect(lambda x, y: print('marker_moved ==> ', x, y))
+        self._otio_view.marker_removed.connect(lambda x, y: print('marker_removed ==> ', x, y))
 
     def eventFilter(self, source, event):
         # print('*'*50)

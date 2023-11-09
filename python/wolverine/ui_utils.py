@@ -97,7 +97,8 @@ class OTIOViewWidget(QtWidgets.QWidget):
     ruler_moved = QtCore.Signal(int)
     ruler_released = QtCore.Signal(int)
     marker_added = QtCore.Signal(int)
-    marker_removed = QtCore.Signal(int)
+    marker_moved = QtCore.Signal(schema.Marker, int)
+    marker_removed = QtCore.Signal(schema.Marker, int)
 
     def __init__(self, parent=None):
         super(OTIOViewWidget, self).__init__(parent=parent)
@@ -219,11 +220,10 @@ def mousePressEvent(self, _):
     modifiers = QtWidgets.QApplication.keyboardModifiers()
     if modifiers not in (QtCore.Qt.ControlModifier, QtCore.Qt.ShiftModifier):
         return
-
     if modifiers == QtCore.Qt.ControlModifier:
         self.otio_parent.marker_added.emit(self.otio_parent.ruler.current_frame())
     elif modifiers == QtCore.Qt.ShiftModifier:
-        self.otio_parent.marker_removed.emit(self.otio_parent.ruler.current_frame())
+        self.otio_parent.marker_removed.emit(None, self.otio_parent.ruler.current_frame())
 
 
 @add_method(track_widgets.Marker)
@@ -256,13 +256,13 @@ def mouseReleaseEvent(self, mouse_event):
         return
 
     if hasattr(self, 'temp_ruler') and self.temp_ruler:
-        self.otio_parent.marker_added.emit(self.temp_ruler.current_frame())
+        self.otio_parent.marker_moved.emit(self.item, self.temp_ruler.current_frame())
         self.otio_parent.composition.removeItem(self.temp_ruler)
         self.temp_ruler = None
         return
 
     if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-        self.otio_parent.marker_removed.emit(self.otio_parent.ruler.current_frame())
+        self.otio_parent.marker_removed.emit(self.item, self.otio_parent.ruler.current_frame())
 
 
 @add_method(ruler_widget.Ruler)
@@ -280,8 +280,18 @@ def mouseMoveEvent(self, _):
 
 @update_method(ruler_widget.Ruler)
 def mouseReleaseEvent(self, _):
-    if self.otio_parent:
-        self.otio_parent.ruler_released.emit(self.current_frame())
+    if not self.otio_parent:
+        return
+    self.otio_parent.ruler_released.emit(self.current_frame())
+
+    # handle/emit marker signals
+    modifiers = QtWidgets.QApplication.keyboardModifiers()
+    if modifiers not in (QtCore.Qt.ControlModifier, QtCore.Qt.ShiftModifier):
+        return
+    if modifiers == QtCore.Qt.ControlModifier:
+        self.otio_parent.marker_added.emit(self.otio_parent.ruler.current_frame())
+    elif modifiers == QtCore.Qt.ShiftModifier:
+        self.otio_parent.marker_removed.emit(None, self.otio_parent.ruler.current_frame())
 
 
 @add_method(ruler_widget.Ruler)
