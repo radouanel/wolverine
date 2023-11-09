@@ -1,14 +1,17 @@
+
 from math import ceil, floor
+from typing import Type, Union
 
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
 from superqt import QLabeledRangeSlider, QLabeledSlider
 
-from opentimelineio import media_linker, schema, adapters
-from opentimelineview import settings, timeline_widget
+from opentimelineio.core import add_method
+from opentimelineio import media_linker, schema, adapters, opentime
+from opentimelineview import settings, timeline_widget, track_widgets, ruler_widget
 from opentimelineview.console import TimelineWidgetItem
 
 
-ONE_BILLION = 10**9  # type: int
+ONE_BILLION: int = 10**9
 
 
 def pixel_pos_to_range_val(widget: QtWidgets.QWidget, pos: int):
@@ -88,89 +91,21 @@ class ClickableRangeSlider(QLabeledRangeSlider):
         self.handleSelected.emit(val)
 
 
-from opentimelineio.core import add_method
-from opentimelineview import track_widgets
-from opentimelineview.ruler_widget import Ruler
-
-
-def update_method(cls, insert='post'):
-    def decorator(func):
-        def updated_func(*args, **kw):
-            if insert == 'pre':
-                func(*args, **kw)
-            getattr(cls, f'{func.__name__}__swap')(*args, **kw)
-            if insert == 'post':
-                func(*args, **kw)
-        setattr(cls, f'{func.__name__}__swap', getattr(cls, func.__name__))
-        setattr(cls, func.__name__, updated_func)
-    return decorator
-
-
-# TODO push fix for media/trimmed timespace
-# TODO events to get : Marker moved, Ruler moving + moved
-# TODO function to add : marker add, marker remove, ruler move
-# TODO remove tracks tab thingy, filter out audio, flatten video tracks
-# TODO maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
-#  actual file, the other file which is flattened by wolverine using (use otiotool.flatten_timeline) ?
-
-
-@update_method(track_widgets.TimeSlider, 'post')
-def mousePressEvent(self, mouse_event):
-    print('TimeSlider mousePressEvent here !')
-
-
-@add_method(Ruler)
-def map_from_time_space(self, frame):
-    # HOW TO USE :
-    # wanted_frame = 300
-    # self._ruler.setPos(self._ruler.map_from_time_space(wanted_frame))
-    # self._ruler.update_frame()
-    # TODO better search, I think we can traverse the items faster to get the one we need
-    # TODO instead of call update_frames (which is slow), update the frame label ourselves since we already have it
-    pos = None
-    for track_item in self.composition.items():
-        if not isinstance(track_item, track_widgets.Track):
-            continue
-        for item in track_item.childItems():
-            if not (isinstance(item, track_widgets.ClipItem) or
-                    isinstance(item, track_widgets.NestedItem)):
-                continue
-            trimmed_range = item.item.trimmed_range()
-            duration = trimmed_range.duration.value
-            start_time = trimmed_range.start_time.value
-            if not start_time <= frame <= start_time + duration:
-                continue
-            ratio = abs(float(frame) - start_time) / duration
-            width = float(item.rect().width())
-            potential_pos = ((ratio * width) -
-                             ((track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH) - item.x()))
-            pos = QtCore.QPointF(abs(potential_pos), (track_widgets.TIME_SLIDER_HEIGHT - track_widgets.MARKER_SIZE))
-            break
-    return pos
-
-
-@update_method(Ruler)
-def mouseMoveEvent(self, mouse_event):
-    print('Ruler mouse_event.pos() ===> ', mouse_event.pos())
-    pos = self.mapToScene(mouse_event.pos())
-    print('Ruler pos ===> ', pos)
-    print('Ruler mouseMoveEvent here !')
-
-
-@add_method(track_widgets.Marker)
-def mouseMoveEvent(self, mouse_event):
-    print('Marker mouse_event.pos() ===> ', mouse_event.pos())
-    pos = self.mapToScene(mouse_event.pos())
-    print('Marker pos ===> ', pos)
-    print('Marker mouseMoveEvent !')
-
-    super(track_widgets.Marker, self).mouseMoveEvent(mouse_event)
-
-
 class OTIOViewWidget(QtWidgets.QWidget):
+
+    time_slider_clicked = QtCore.Signal(int)
+    ruler_pressed = QtCore.Signal(int)
+    ruler_moved = QtCore.Signal(int)
+    ruler_released = QtCore.Signal(int)
+    marker_added = QtCore.Signal(int)
+    marker_removed = QtCore.Signal(int)
+
     def __init__(self, parent=None):
         super(OTIOViewWidget, self).__init__(parent=parent)
         self.setObjectName('OpenTimelineIO Viewer')
+
+        for cls in [track_widgets.TimeSlider, ruler_widget.Ruler, track_widgets.Marker]:
+            setattr(cls, 'otio_parent', self)
 
         self._current_file = None
         # widgets
@@ -198,9 +133,6 @@ class OTIOViewWidget(QtWidgets.QWidget):
         # signals
         self.tracks_widget.itemSelectionChanged.connect(
             self._change_track
-        )
-        self.timeline_widget.selection_changed.connect(
-            self._selection_changed
         )
 
         self.setStyleSheet(settings.VIEW_STYLESHEET)
@@ -236,14 +168,198 @@ class OTIOViewWidget(QtWidgets.QWidget):
             self.tracks_widget.setVisible(True)
             self.timeline_widget.set_timeline(None)
 
+    def load_timeline(self, timeline: schema.Timeline):
+        self.tracks_widget.clear()
+        self.timeline_widget.set_timeline(timeline)
+        self.tracks_widget.setVisible(False)
+
+    @property
+    def composition(self):
+        if not self.timeline_widget.currentWidget():
+            return
+        return self.timeline_widget.currentWidget().scene()
+
+    @property
+    def time_slider(self):
+        return self.composition._time_slider
+
+    @property
+    def ruler(self):
+        return self.composition.get_ruler()
+
     def _change_track(self):
         selection = self.tracks_widget.selectedItems()
         if selection:
             self.timeline_widget.set_timeline(selection[0].timeline)
 
-    def _selection_changed(self, item):
-        print('OTIO Selected Item : ', item)
-
     def show(self):
         super(OTIOViewWidget, self).show()
         self.timeline_widget.frame_all()
+
+
+def update_method(cls: type, insert: str='post'):
+    def decorator(func):
+        def updated_func(*args, **kw):
+            if insert == 'pre':
+                func(*args, **kw)
+            getattr(cls, f'{func.__name__}__swap')(*args, **kw)
+            if insert == 'post':
+                func(*args, **kw)
+        setattr(cls, f'{func.__name__}__swap', getattr(cls, func.__name__))
+        setattr(cls, func.__name__, updated_func)
+    return decorator
+
+
+def find_in_parents(widget: QtWidgets.QWidget, parent_class: Type) -> Union[QtWidgets.QWidget, None]:
+    last_parent = widget
+    while hasattr(last_parent, 'parent') or hasattr(last_parent, 'scene'):
+        if hasattr(last_parent, 'parent'):
+            last_parent = last_parent.parent()
+        else:
+            last_parent = last_parent.scene()
+        if isinstance(last_parent, parent_class):
+            break
+    if not isinstance(last_parent, parent_class):
+        return
+    return last_parent
+
+
+@update_method(track_widgets.TimeSlider)
+def mousePressEvent(self, _):
+    # if not hasattr(self, 'otio_parent'):
+    #     otio_view = find_in_parents(self, OTIOViewWidget)
+    #     setattr(self, 'otio_parent', otio_view)
+
+    if not self.otio_parent:
+        return
+    self.otio_parent.time_slider_clicked.emit(self.otio_parent.ruler.current_frame())
+
+    # handle/emit marker signals
+    modifiers = QtWidgets.QApplication.keyboardModifiers()
+    if modifiers not in (QtCore.Qt.ControlModifier, QtCore.Qt.ShiftModifier):
+        return
+
+    if modifiers == QtCore.Qt.ControlModifier:
+        self.otio_parent.marker_added.emit(self.otio_parent.ruler.current_frame())
+    elif modifiers == QtCore.Qt.ShiftModifier:
+        self.otio_parent.marker_removed.emit(self.otio_parent.ruler.current_frame())
+
+
+@add_method(track_widgets.Marker)
+def mouseMoveEvent(self, mouse_event):
+    super(track_widgets.Marker, self).mouseMoveEvent(mouse_event)
+
+    if not self.otio_parent:
+        return
+
+    # add ruler and move it with mouse
+    if not hasattr(self, 'temp_ruler') or not self.temp_ruler:
+        # create new/temp ruler and let otio ui handle creation
+        setattr(self, 'temp_ruler', self.otio_parent.composition._add_ruler())
+        # set ruler color
+        self.temp_ruler.setBrush(QtGui.QBrush(QtGui.QColor(50, 20, 255, 255)))
+        # reset time slider ruler which was overriden when creating temp ruler
+        self.otio_parent.time_slider.add_ruler(self.otio_parent.ruler)
+
+    pos = self.mapToScene(mouse_event.pos())
+    pos = max(pos.x() - track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH, 0)
+    self.temp_ruler.setPos(QtCore.QPointF(pos, track_widgets.TIME_SLIDER_HEIGHT - track_widgets.MARKER_SIZE))
+    self.temp_ruler.update_frame()
+
+    # if not hasattr(self, 'temp_marker'):
+    #     setattr(self, 'temp_marker', track_widgets.Marker(self.item.deepcopy(), None))
+    #     self.temp_marker.setParentItem(self.otio_parent.time_slider)
+    #     self.temp_marker.item.color = 'BLUE'
+    #
+    # pos = self.mapToScene(mouse_event.pos())
+    # pos = max(pos.x() - track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH, 0)
+    #
+    # marker = self.temp_marker
+    # marker.setX(pos)
+    # marker.setY(self.pos().y())
+    # marker.setParentItem(self.otio_parent.time_slider)
+    # marker.counteract_zoom()
+
+
+@add_method(track_widgets.Marker)
+def mouseReleaseEvent(self, mouse_event):
+    super(track_widgets.Marker, self).mouseReleaseEvent(mouse_event)
+
+    if not self.otio_parent:
+        return
+
+    if hasattr(self, 'temp_ruler') and self.temp_ruler:
+        self.otio_parent.marker_added.emit(self.temp_ruler.current_frame())
+        self.otio_parent.composition.removeItem(self.temp_ruler)
+        self.temp_ruler = None
+        return
+
+    if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
+        self.otio_parent.marker_removed.emit(self.otio_parent.ruler.current_frame())
+
+
+@add_method(ruler_widget.Ruler)
+def mousePressEvent(self, mouse_event):
+    super(ruler_widget.Ruler, self).mousePressEvent(mouse_event)
+    if self.otio_parent:
+        self.otio_parent.ruler_pressed.emit(self.current_frame())
+
+
+@update_method(ruler_widget.Ruler)
+def mouseMoveEvent(self, _):
+    if self.otio_parent:
+        self.otio_parent.ruler_moved.emit(self.current_frame())
+
+
+@update_method(ruler_widget.Ruler)
+def mouseReleaseEvent(self, _):
+    if self.otio_parent:
+        self.otio_parent.ruler_released.emit(self.current_frame())
+
+
+@add_method(ruler_widget.Ruler)
+def current_frame(self) -> int:
+    cur_frame = -1
+    for tw, frameNumber_tail, frameNumber_head in self.labels:
+        cur_frame = frameNumber_head.frameNumber.text() or frameNumber_tail.frameNumber.text()
+        if cur_frame:
+            break
+    return int(cur_frame)
+
+
+@add_method(ruler_widget.Ruler)
+def map_from_time_space(self, frame):
+    if frame == self.current_frame():
+        return None, None
+
+    pos = None
+    clip_item = None
+    for track_item in self.composition.items():
+        if not isinstance(track_item, track_widgets.Track):
+            continue
+        for item in track_item.childItems():
+            if not isinstance(item, (track_widgets.ClipItem, track_widgets.NestedItem)):
+                continue
+            trimmed_range = item.item.trimmed_range()
+            duration = trimmed_range.duration.value
+            start_time = trimmed_range.start_time.value
+            if not start_time <= frame <= start_time + duration:
+                continue
+            ratio = abs(float(frame) - start_time) / duration
+            width = float(item.rect().width())
+            potential_pos = ((ratio * width) -
+                             ((track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH) - item.x()))
+            pos = QtCore.QPointF(abs(potential_pos), (track_widgets.TIME_SLIDER_HEIGHT - track_widgets.MARKER_SIZE))
+            clip_item = item.item
+            break
+    return pos, clip_item
+
+
+@add_method(ruler_widget.Ruler)
+def move_to_frame(self, frame):
+    pos, clip_item = self.map_from_time_space(frame)
+    if not pos:
+        return
+    self.setPos(pos)
+    self.update_frame(clip_item.trimmed_range())
+

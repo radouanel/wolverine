@@ -21,9 +21,10 @@ class FFProbe:
     duration: float
     frames: int
 
-    def as_dict(self):
+    def to_dict(self):
         probe = asdict(self)
         probe['source'] = self.source.as_posix()
+
         return probe
 
     @staticmethod
@@ -121,7 +122,7 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
     shots_data = []
     shots_dicts = [dict([kv.split('=') for kv in f'media_type={line}'.split('|')])
                    for line in str(out).strip().split('media_type=') if line and line != "b'"]
-    pprint.pprint(shots_dicts)
+    # pprint.pprint(shots_dicts)
     shot_starts = []
     for shot_dict in shots_dicts:
         start_time = float(shot_dict.get('pkt_dts_time')

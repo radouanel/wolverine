@@ -1,42 +1,51 @@
 
 import sys
 from pathlib import Path
-from typing import Union, List, Tuple
+from getpass import getuser
+from json import loads, dumps
+from typing import Union, List, Tuple, Dict
 
 import mpv
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
 from superqt import QLabeledRangeSlider, QLabeledSlider
-from opentimelineio import opentime
+from opentimelineio import opentime, schema
 
 from wolverine import shots
 from wolverine import utils
 from wolverine.ui_utils import ONE_BILLION, ClickableSlider, ClickableRangeSlider, OTIOViewWidget
 
 VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
+TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
 
 
 # TODO override opentimelineview's UI
-# TODO convert our markers/shotData to an OTIO Timeline/Stack/Track(s)/Clips/Markers, when updating a shot, update the ShotData which will in turn update the OTIO clip
+#  - function to add : marker add, marker remove, ruler move, marker move, select shot
+#  - override OTIOViewWidget and disable/hide what we don't need instead of recreating the whole class
+#  - find a way to zoom in on specific parts of the timeline
+#  - maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
+#     actual file, the other which is flattened by wolverine using (use otiotool.flatten_timeline) ?
+# TODO add buttons `Add/remove Marker` which adds marker at current frame
 # TODO update next/prev shots if a shot range is updated
 
 # TODO export thumbnails, movies, edl, xml, otio, excel, audio of shots as wav/mp3
 # TODO show video info in a widget (fps, frames, duration, resolution)
+# TODO show shot info in a widget for the shot at the current frame (name, sequence, frame, timecode)
 
-# TODO use timecode module ! actually better to just use otio for this as well [v]
 # TODO add parent sequence selection
 # TODO add ignored shot option in UI
-# TODO (maybe let's not handle audio at first ?) each ShotData should be able to hold a video and multiple audio OTIO tracks/clips
 
 # TODO in shots panel, allow for a different shot start (other than 101)
-# TODO add button `Add Marker` which adds marker at current frame
-# TODO update shots thumbnail/video in background
+# TODO run shot detection in background and update shots thumbnail/video in background
 # TODO add progress bar
-# TODO play shot movie when hovering over thumbnail
+# TODO play shot movie when hovering over thumbnail or use existing player and ab-loop over shot range
+#    use mpv command : self._player.command('ab-loop-a', shot_start_time); self._player.command('ab-loop-b', shot_end_time)
+#    or set : self._player.ab_loop_a = shot_start_time; self._player.ab_loop_b = shot_end_time
+#    or set : start/end and loop in mpv : self._player.start = shot_start_time; self._player.end = shot_end_time; self._player.loop = True
 # TODO add colors to shots/shot markers
 # TODO add unit tests
 
 # FIXME keyboard shortcuts get overriden by dialog
-# FIXME prev/next frame sometimes stuck between frames
+# FIXME prev/next frame sometimes stuck between frames (haven't been able to reproduce this for a while)
 
 
 class ShotWidget(QtWidgets.QWidget):
@@ -49,8 +58,8 @@ class ShotWidget(QtWidgets.QWidget):
 
     def _build_ui(self):
         self._shot_img_lb = QtWidgets.QLabel(self)
-        self._shot_img_lb.setPixmap(QtGui.QIcon(self._shot_data.thumbnail.as_posix()).pixmap(80, 80))
-        # self._shot_img_lb.resize(pixmap.width(), pixmap.height())
+        if self._shot_data.thumbnail:
+            self._shot_img_lb.setPixmap(QtGui.QIcon(self._shot_data.thumbnail.as_posix()).pixmap(80, 80))
 
         self._shot_name_lb = QtWidgets.QLabel(f'SH{(self._shot_data.index * 10):03d}')
         self._start_sp = QtWidgets.QSpinBox()
@@ -149,24 +158,16 @@ class WolverineUI(QtWidgets.QDialog):
         super().__init__(parent=parent)
         self.setWindowTitle('Wolverine - Sequence Splitter')
 
-        self.shots: List[shots.ShotData] = []
         self._full_screen: bool = False
         self._last_pause_state: bool = True
         self._probe_data: Union[utils.FFProbe, None] = None
+        self.shots: List[shots.ShotData] = []
 
         self._build_ui()
         self._connect_ui()
-        player = mpv.MPV(wid=str(int(self._screen.winId())), keep_open='yes', framedrop='no')
 
-        @player.property_observer('time-pos')
-        def time_observer(_, value):
-            self._time_observer(value)
-
-        self._player = player
-
-        # FIXME delete bolow, for texting only
-        self._src_file_le.setText(Path(r'\\ripley\work\TFT_SET_10\1_PREPROD\03_ANIMATIC\TFTSet10_ANC_Full_230728_shotnumbers.mp4').as_posix())
-        self._video_selected()
+        self._player = self.__init_player()
+        self.load_config()
 
         # from fcpxml.fcp import FCPXML
         # fcp_path = Path(r'C:\Users\rlahmidi\Desktop\TFTSet10_ANC_Full_230728_shotnumbers.xml')
@@ -218,13 +219,16 @@ class WolverineUI(QtWidgets.QDialog):
         self._fullscreen_pb = QtWidgets.QPushButton('F')
         self._timeline_sl = ClickableSlider(QtCore.Qt.Horizontal)
         self._timeline_sl.setEnabled(False)
+        self._timeline_sl.setVisible(False)
+        self._zoom_timeline_sl = QLabeledRangeSlider(QtCore.Qt.Orientation.Horizontal)
+        self._zoom_timeline_sl.setEnabled(False)
         self._current_frame_sp = QtWidgets.QSpinBox()
         self._current_frame_sp.wheelEvent = lambda event: None
         self._current_frame_sp.setEnabled(False)
-        self._zoom_timeline_sl = QLabeledRangeSlider(QtCore.Qt.Orientation.Horizontal)
-        self._zoom_timeline_sl.setEnabled(False)
         self._marker_timeline_sl = ClickableRangeSlider(QtCore.Qt.Orientation.Horizontal)
         self._marker_timeline_sl.setEnabled(False)
+        self._marker_timeline_sl.setVisible(False)
+        self._otio_view = OTIOViewWidget(parent=self)
         self._dst_dir_le = QtWidgets.QLineEdit()
         self._browse_dst_pb = QtWidgets.QPushButton('Browse Destination')
         self._import_pb = QtWidgets.QPushButton('Import')
@@ -255,10 +259,6 @@ class WolverineUI(QtWidgets.QDialog):
         player_widget_lay.addLayout(screen_ctrl_lay)
         player_widget_lay.addItem(QtWidgets.QSpacerItem(10, 40, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding))
 
-        edl_path = Path(r'C:\Users\rlahmidi\Desktop\TFTSet10_ANC_Full_230728_shotnumbers.edl')
-        self._otio_view = OTIOViewWidget(parent=self)
-        self._otio_view.load(edl_path.as_posix())
-
         layout = QtWidgets.QGridLayout()
         layout.addWidget(self._src_file_le, 0, 0, 1, 1)
         layout.addWidget(self._browse_src_pb, 0, 1, 1, 1)
@@ -266,15 +266,15 @@ class WolverineUI(QtWidgets.QDialog):
         layout.addWidget(self._process_pb, 0, 3, 1, 1)
         layout.addWidget(self._player_widget, 1, 0, 2, 4)
         layout.addWidget(self._timeline_sl, 3, 0, 1, 3)
-        layout.addWidget(self._current_frame_sp, 3, 3, 1, 1)
         layout.addWidget(self._zoom_timeline_sl, 4, 0, 1, 3)
+        layout.addWidget(self._current_frame_sp, 4, 3, 1, 1)
         layout.addWidget(self._marker_timeline_sl, 5, 0, 1, 3)
-        layout.addWidget(self._shots_panel_lw, 1, 4, 5, 3)
-        layout.addWidget(self._dst_dir_le, 6, 0, 1, 4)
-        layout.addWidget(self._browse_dst_pb, 6, 4, 1, 1)
-        layout.addWidget(self._export_pb, 6, 5, 1, 1)
-        layout.addWidget(self._import_pb, 6, 6, 1, 1)
-        layout.addWidget(self._otio_view, 7, 0, 1, 4)
+        layout.addWidget(self._shots_panel_lw, 1, 4, 6, 3)
+        layout.addWidget(self._otio_view, 6, 0, 1, 4)
+        layout.addWidget(self._dst_dir_le, 7, 0, 1, 4)
+        layout.addWidget(self._browse_dst_pb, 7, 4, 1, 1)
+        layout.addWidget(self._export_pb, 7, 5, 1, 1)
+        layout.addWidget(self._import_pb, 7, 6, 1, 1)
         self.setLayout(layout)
 
     def _connect_ui(self):
@@ -299,6 +299,15 @@ class WolverineUI(QtWidgets.QDialog):
         self._browse_dst_pb.clicked.connect(self._browse_output)
         self._export_pb.clicked.connect(self._export_all)
 
+        # OTIOview signals
+        self._otio_view.timeline_widget.selection_changed.connect(self._timeline_selection_changed)
+        self._otio_view.time_slider_clicked.connect(self._timeline_seek)
+        self._otio_view.ruler_pressed.connect(lambda: self._pause_player(True))
+        self._otio_view.ruler_moved.connect(self._timeline_seek)
+        self._otio_view.ruler_released.connect(self._timeline_seek)
+        self._otio_view.marker_added.connect(lambda x: print('marker_added ==> ', x))
+        self._otio_view.marker_removed.connect(lambda x: print('marker_removed ==> ', x))
+
     def eventFilter(self, source, event):
         # print('*'*50)
         # print('source ===> ', source)
@@ -320,6 +329,19 @@ class WolverineUI(QtWidgets.QDialog):
         self._player_controls(event.key())
         # self.accept()
 
+    def __init_player(self):
+        # set mpv player and time observer callback
+        player = mpv.MPV(wid=str(int(self._screen.winId())), keep_open='yes', framedrop='no')
+
+        @player.property_observer('time-pos')
+        def time_observer(_, value):
+            self._time_observer(value)
+
+        return player
+
+    def _timeline_selection_changed(self, item):
+        print('OTIO Selected Item : ', item)
+
     def _browse_video(self):
         last_source = Path(self._src_file_le.text())
         file_filter = f'Video files (*{" *".join(VALID_VIDEO_EXT)})'
@@ -340,18 +362,76 @@ class WolverineUI(QtWidgets.QDialog):
         self._process_pb.setEnabled(enable_ui)
         self._threshold_sp.setEnabled(enable_ui)
 
-    def _process_video(self):
+        self.save_config(video_path)
+        self.load_temp_data(video_path)
+
+    def load_temp_data(self, video_path: Path, save_path: Path = None):
+        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'{video_path.stem}.json')
+        if not temp_save_path.exists():
+            return
+        save_data = loads(temp_save_path.read_text())
+        if int(save_data.get('threshold', 80)) != self._threshold_sp.value():
+            return
+
+        msg = 'A previous auto-save has been found, would you like to load it ?'
+        msg_box = QtWidgets.QMessageBox.question(None, 'Load Auto-Save ?', msg)
+        if msg_box == QtWidgets.QMessageBox.No:
+            return
+        self._process_video(save_data=save_data)
+
+    def save_temp_data(self, video_path: Path, save_path: Path = None):
+        wolverine_data = {
+            'source': video_path.as_posix(),
+            'threshold': self._threshold_sp.value(),
+            'probe_data': self._probe_data.to_dict(),
+            'shots': []
+        }
+        for shot in self.shots:
+            wolverine_data['shots'].append(shot.to_dict())
+
+        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'{video_path.stem}.json')
+        temp_save_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_save_path.write_text(dumps(wolverine_data))
+
+    def load_config(self, save_path: Path = None):
+        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'config.json')
+        if not temp_save_path.exists():
+            return
+
+        last_open = loads(temp_save_path.read_text()).get('last_open', '')
+        self._src_file_le.setText(Path(last_open).as_posix())
+
+        if self._src_file_le.text():
+            self.load_temp_data(Path(self._src_file_le.text()))
+
+    def save_config(self, video_path: Path, save_path: Path = None):
+        config_data = {'last_open': video_path.as_posix()}
+
+        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'config.json')
+        temp_save_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_save_path.write_text(dumps(config_data))
+
+    def _process_video(self, save_data: Dict = None):
         video_path = Path(self._src_file_le.text())
         if not self._player or not video_path.exists():
             return
-        self._probe_data = utils.probe_file(video_path)
-        self.shots = utils.probe_file_shots(video_path, self._probe_data.fps, self._probe_data.frames,
-                                            detection_threshold=self._threshold_sp.value())
+
+        if not save_data:
+            self._probe_data = utils.probe_file(video_path)
+            self.shots = utils.probe_file_shots(video_path, self._probe_data.fps, self._probe_data.frames,
+                                                detection_threshold=self._threshold_sp.value())
+        else:
+            self._probe_data = utils.FFProbe.from_dict(save_data['probe_data'])
+            for shot_data in save_data.get('shots', []):
+                shot_data = shots.ShotData.from_dict(shot_data)
+                self.shots.append(shot_data)
+
         if not self.shots:
             QtWidgets.QMessageBox.critical(self, 'Detection Error', 'Could not detect any shots in provided video !')
             return
-        import pprint
-        pprint.pprint(self.shots)
+
+        self.save_temp_data(video_path)
+        self._update_otio_timeline()
 
         frame_range = (1, self._probe_data.frames)
         self._current_frame_sp.blockSignals(True)
@@ -372,6 +452,27 @@ class WolverineUI(QtWidgets.QDialog):
 
         self._player.loadfile(video_path.as_posix())
         self._player.pause = True
+
+    def _update_otio_timeline(self, video_path: Path = None):
+        video_path = video_path or Path(self._src_file_le.text())
+        # add shots to OTIO track
+        track = schema.Track(
+            name=video_path.stem,
+            kind=schema.TrackKind.Video
+        )
+        for shot in self.shots:
+            track.append(shot.otio_clip)
+        # add track to stack
+        stack = schema.Stack(
+            children=[track],
+            name=video_path.stem,
+        )
+        # add stack to timeline
+        timeline = schema.Timeline()
+        timeline.tracks = stack
+        timeline.metadata['source'] = video_path.as_posix()
+        self._otio_view.load_timeline(timeline)
+        self._otio_view.ruler.move_to_frame(self._current_frame_sp.value() or 1)
 
     def _browse_output(self):
         last_directory = Path(self._dst_dir_le.text())
@@ -402,6 +503,7 @@ class WolverineUI(QtWidgets.QDialog):
         current_frame = opentime.to_frames(opentime.from_seconds(value, self._probe_data.fps))
         self._timeline_sl.setValue(int(current_frame))
         self._current_frame_sp.setValue(int(current_frame))
+        self._otio_view.ruler.move_to_frame(current_frame)
         QtWidgets.QApplication.processEvents()
 
     def _timeline_seek(self, value: Union[int, float] = None):
