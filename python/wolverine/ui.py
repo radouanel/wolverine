@@ -20,7 +20,6 @@ TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
 
 # TODO override opentimelineview's UI
 #  - function to add : marker add, marker remove, ruler move, marker move, select shot
-#  - override OTIOViewWidget and disable/hide what we don't need instead of recreating the whole class
 #  - find a way to zoom in on specific parts of the timeline
 #  - maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
 #     actual file, the other which is flattened by wolverine using (use otiotool.flatten_timeline) ?

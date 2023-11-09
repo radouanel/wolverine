@@ -1,12 +1,11 @@
 
 from math import ceil, floor
-from typing import Type, Union
 
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
 from superqt import QLabeledRangeSlider, QLabeledSlider
 
 from opentimelineio.core import add_method
-from opentimelineio import media_linker, schema, adapters, opentime
+from opentimelineio import schema, adapters, media_linker
 from opentimelineview import settings, timeline_widget, track_widgets, ruler_widget
 from opentimelineview.console import TimelineWidgetItem
 
@@ -210,26 +209,8 @@ def update_method(cls: type, insert: str='post'):
     return decorator
 
 
-def find_in_parents(widget: QtWidgets.QWidget, parent_class: Type) -> Union[QtWidgets.QWidget, None]:
-    last_parent = widget
-    while hasattr(last_parent, 'parent') or hasattr(last_parent, 'scene'):
-        if hasattr(last_parent, 'parent'):
-            last_parent = last_parent.parent()
-        else:
-            last_parent = last_parent.scene()
-        if isinstance(last_parent, parent_class):
-            break
-    if not isinstance(last_parent, parent_class):
-        return
-    return last_parent
-
-
 @update_method(track_widgets.TimeSlider)
 def mousePressEvent(self, _):
-    # if not hasattr(self, 'otio_parent'):
-    #     otio_view = find_in_parents(self, OTIOViewWidget)
-    #     setattr(self, 'otio_parent', otio_view)
-
     if not self.otio_parent:
         return
     self.otio_parent.time_slider_clicked.emit(self.otio_parent.ruler.current_frame())
@@ -265,20 +246,6 @@ def mouseMoveEvent(self, mouse_event):
     pos = max(pos.x() - track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH, 0)
     self.temp_ruler.setPos(QtCore.QPointF(pos, track_widgets.TIME_SLIDER_HEIGHT - track_widgets.MARKER_SIZE))
     self.temp_ruler.update_frame()
-
-    # if not hasattr(self, 'temp_marker'):
-    #     setattr(self, 'temp_marker', track_widgets.Marker(self.item.deepcopy(), None))
-    #     self.temp_marker.setParentItem(self.otio_parent.time_slider)
-    #     self.temp_marker.item.color = 'BLUE'
-    #
-    # pos = self.mapToScene(mouse_event.pos())
-    # pos = max(pos.x() - track_widgets.CURRENT_ZOOM_LEVEL * track_widgets.TRACK_NAME_WIDGET_WIDTH, 0)
-    #
-    # marker = self.temp_marker
-    # marker.setX(pos)
-    # marker.setY(self.pos().y())
-    # marker.setParentItem(self.otio_parent.time_slider)
-    # marker.counteract_zoom()
 
 
 @add_method(track_widgets.Marker)
