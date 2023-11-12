@@ -54,6 +54,10 @@ class ShotData:
     def end_frame(self):
         return self.start_frame + self.duration
 
+    @end_frame.setter
+    def end_frame(self, frame: int):
+        self.duration = frame - self.start_frame
+
     @property
     def new_end(self):
         return self.new_start + self.duration

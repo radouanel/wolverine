@@ -262,7 +262,7 @@ def mouseReleaseEvent(self, mouse_event):
         return
 
     if QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.ShiftModifier:
-        self.otio_parent.marker_removed.emit(self.item, self.otio_parent.ruler.current_frame())
+        self.otio_parent.marker_removed.emit(self.item, -1)
 
 
 @add_method(ruler_widget.Ruler)
@@ -301,12 +301,13 @@ def current_frame(self) -> int:
         cur_frame = frameNumber_head.frameNumber.text() or frameNumber_tail.frameNumber.text()
         if cur_frame:
             break
-    return int(cur_frame)
+    return int(cur_frame) if cur_frame else -1
 
 
 @add_method(ruler_widget.Ruler)
 def map_from_time_space(self, frame):
-    if frame == self.current_frame():
+    cur_frame = self.current_frame()
+    if cur_frame == -1 or frame == cur_frame:
         return None, None
 
     pos = None

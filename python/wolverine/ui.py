@@ -18,6 +18,13 @@ VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
 TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
 
 
+# TODO ShotData class should only require a RationalTime object for init, the rest of the values (start_frame,
+#  start_time, duration, etc...) should all be properties that get from and update the shots RationalTime object. Same
+#  thing for (new_start, new_end), and we use TimeTransform functions to offset the shots base RationalTime object, also
+#  use duration_from_start_end_time to get correct duration everytime
+
+# FIXME shot ranges not correct, right now shot N's end is also shot N+1's start, it should N(s, e), N+1(e-1, e2)
+
 # TODO override opentimelineview's UI
 #  - function to add : marker add, marker remove, ruler move, marker move, select shot
 #  - find a way to zoom in on specific parts of the timeline
@@ -142,6 +149,10 @@ class ShotListWidget(QtWidgets.QWidget):
         if not shot_list:
             return self.shot_widgets
 
+        while self._shot_list_lw.layout().count():
+            child = self._shot_list_lw.layout().takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
         for shot_data in sorted(self._shot_list, key=lambda x: str(f'{x.index:06d}')):
             cam_widget = ShotWidget(parent=self, shot_data=shot_data)
             self.shot_widgets.append(cam_widget)
@@ -221,6 +232,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._timeline_sl.setVisible(False)
         self._zoom_timeline_sl = QLabeledRangeSlider(QtCore.Qt.Orientation.Horizontal)
         self._zoom_timeline_sl.setEnabled(False)
+        self._zoom_timeline_sl.setVisible(False)
         self._current_frame_sp = QtWidgets.QSpinBox()
         self._current_frame_sp.wheelEvent = lambda event: None
         self._current_frame_sp.setEnabled(False)
@@ -304,9 +316,9 @@ class WolverineUI(QtWidgets.QDialog):
         self._otio_view.ruler_pressed.connect(lambda: self._pause_player(True))
         self._otio_view.ruler_moved.connect(self._timeline_seek)
         self._otio_view.ruler_released.connect(self._timeline_seek)
-        self._otio_view.marker_added.connect(lambda x: print('marker_added ==> ', x))
-        self._otio_view.marker_moved.connect(lambda x, y: print('marker_moved ==> ', x, y))
-        self._otio_view.marker_removed.connect(lambda x, y: print('marker_removed ==> ', x, y))
+        self._otio_view.marker_added.connect(self._add_shot)
+        self._otio_view.marker_moved.connect(self._update_shot)
+        self._otio_view.marker_removed.connect(self._remove_shot)
 
     def eventFilter(self, source, event):
         # print('*'*50)
@@ -461,6 +473,8 @@ class WolverineUI(QtWidgets.QDialog):
             kind=schema.TrackKind.Video
         )
         for shot in self.shots:
+            if shot.otio_clip.parent():
+                shot.otio_clip.parent().remove(shot.otio_clip)
             track.append(shot.otio_clip)
         # add track to stack
         stack = schema.Stack(
@@ -473,6 +487,79 @@ class WolverineUI(QtWidgets.QDialog):
         timeline.metadata['source'] = video_path.as_posix()
         self._otio_view.load_timeline(timeline)
         self._otio_view.ruler.move_to_frame(self._current_frame_sp.value() or 1)
+
+    def _find_closest_shots(self, frame: int) -> shots.ShotData:
+        closest_shot = None
+        for i, shot in enumerate(self.shots):
+            if not (shot.start_frame <= frame < shot.end_frame):
+                continue
+            closest_shot = shot
+            break
+
+        return closest_shot
+
+    def _sort_shots(self):
+        self.shots = sorted(self.shots, key=lambda x: x.start_frame)
+        for i, shot in enumerate(self.shots):
+            shot.index = i + 1
+        self._update_otio_timeline()
+        self._shots_panel_lw.refresh_shots(self.shots)
+
+    def _add_shot(self, start_frame: int, end_frame: int = -1):
+        closest_shot = self._find_closest_shots(start_frame)
+        if not closest_shot:
+            return False
+        if end_frame == -1:
+            end_frame = closest_shot.end_frame
+        if (start_frame, end_frame) == (closest_shot.start_frame, closest_shot.end_frame):
+            return False
+
+        duration = end_frame - start_frame
+        new_shot = shots.ShotData(
+            index=0,
+            source=Path(self._src_file_le.text()),
+            fps=self._probe_data.fps,
+            start_time=opentime.to_seconds(opentime.from_frames(start_frame, self._probe_data.fps)),
+            duration_time=opentime.to_seconds(opentime.from_frames(duration, self._probe_data.fps)),
+            start_frame=start_frame,
+            duration=duration
+        )
+        closest_shot.end_frame = start_frame
+
+        self.shots.append(new_shot)
+        self._sort_shots()
+
+    def _update_shot(self, marker: schema.Marker, new_start: int):
+        old_start = marker.marked_range.start_time.to_frames()
+        if old_start == new_start:
+            return False
+        closest_shot = self._find_closest_shots(old_start)
+        if not closest_shot:
+            return False
+
+        prev_shot = [s for s in self.shots if s.end_frame == closest_shot.start_frame]
+        next_shot = [s for s in self.shots if s.start_frame == closest_shot.end_frame]
+        closest_shot.start_frame = new_start
+        closest_shot.duration = closest_shot.end_frame - closest_shot.start_frame
+        if prev_shot:
+            prev_shot[0].end_frame = closest_shot.start_frame
+        if next_shot:
+            next_shot[0].start_frame = closest_shot.start_frame
+            next_shot[0].duration = next_shot[0].end_frame - next_shot[0].start_frame
+
+        self._sort_shots()
+
+    def _remove_shot(self, marker: schema.Marker, shot_start: int):
+        if marker:
+            shot_start = marker.marked_range.start_time.to_frames()
+        closest_shot = self._find_closest_shots(shot_start)
+        prev_shot = [s for s in self.shots if s.end_frame == closest_shot.start_frame]
+        if not prev_shot:
+            return False
+        prev_shot[0].end_frame = closest_shot.end_frame
+        self.shots.remove(closest_shot)
+
+        self._sort_shots()
 
     def _browse_output(self):
         last_directory = Path(self._dst_dir_le.text())
