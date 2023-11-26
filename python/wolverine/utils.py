@@ -133,22 +133,23 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
                           or (shot_dict.get('pts', 0) / 1000)
                           or (shot_dict.get('best_effort_timestamp', 0) / 1000)
                           or 0)
-        shot_starts.append((start_time, start_frame))
-    for i, (start_time, start_frame) in enumerate(shot_starts):
+        if not start_frame and start_time:
+            start_frame = opentime.from_seconds(start_time, fps).to_frames()
+        shot_starts.append(start_frame)
+    for i, start_frame in enumerate(shot_starts):
         i = int(i + 1)
         if i < len(shot_starts):
-            next_start_time, next_start_frame = shot_starts[i]
+            next_start_frame = shot_starts[i] - 1
         else:
-            next_start_time = opentime.to_seconds(opentime.from_frames(nb_frames, fps))
             next_start_frame = nb_frames
         shot_data = ShotData(
             index=i,
             fps=fps,
             source=file_path,
-            start_time=start_time,
-            duration_time=(next_start_time - start_time),
-            start_frame=start_frame,
-            duration=(next_start_frame - start_frame),
+            range=opentime.range_from_start_end_time_inclusive(
+                start_time=opentime.from_frames(start_frame, fps),
+                end_time_inclusive=opentime.from_frames(next_start_frame, fps),
+            )
         )
         shots_data.append(shot_data)
     return shots_data
@@ -159,9 +160,9 @@ def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):
     output_path.mkdir(parents=True, exist_ok=True)
     for shot_data in shot_list:
         if not shot_data.thumbnail or not shot_data.thumbnail.exists():
-            shot_data.get_thumbnail()
+            shot_data.generate_thumbnail()
         if not shot_data.movie or not shot_data.movie.exists():
-            shot_data.get_movie()
+            shot_data.generate_movie()
         copy(shot_data.thumbnail, Path(output_path).joinpath(shot_data.thumbnail.name))
         copy(shot_data.movie, Path(output_path).joinpath(shot_data.movie.name))
 

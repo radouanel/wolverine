@@ -1,7 +1,6 @@
-
+import os
 import sys
 from pathlib import Path
-from getpass import getuser
 from json import loads, dumps
 from typing import Union, List, Tuple, Dict
 
@@ -15,23 +14,24 @@ from wolverine import utils
 from wolverine.ui_utils import ONE_BILLION, ClickableSlider, ClickableRangeSlider, OTIOViewWidget
 
 VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
-TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
+TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('wolverine')
 
 
-# TODO ShotData class should only require a RationalTime object for init, the rest of the values (start_frame,
-#  start_time, duration, etc...) should all be properties that get from and update the shots RationalTime object. Same
-#  thing for (new_start, new_end), and we use TimeTransform functions to offset the shots base RationalTime object, also
-#  use duration_from_start_end_time to get correct duration everytime
+# TODO save shot_suffix in temp config and reload it
+# TODO test buttons `Add/remove Marker` which adds marker at current frame
+# TODO add export actions system
+# TODO add seer export action (create shots, set range, set thumbnail/movie)
 
-# FIXME shot ranges not correct, right now shot N's end is also shot N+1's start, it should N(s, e), N+1(e-1, e2)
+# TODO enable add marker button only if current frame doesn't already have a marker
+# TODO enable remove marker button only if current frame has a marker
+
+# TODO add click event on thumbnail, when clicked set current frame to shot start
 
 # TODO override opentimelineview's UI
 #  - function to add : marker add, marker remove, ruler move, marker move, select shot
 #  - find a way to zoom in on specific parts of the timeline
 #  - maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
 #     actual file, the other which is flattened by wolverine using (use otiotool.flatten_timeline) ?
-# TODO add buttons `Add/remove Marker` which adds marker at current frame
-# TODO update next/prev shots if a shot range is updated
 
 # TODO export thumbnails, movies, edl, xml, otio, excel, audio of shots as wav/mp3
 # TODO show video info in a widget (fps, frames, duration, resolution)
@@ -39,6 +39,8 @@ TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
 
 # TODO add parent sequence selection
 # TODO add ignored shot option in UI
+# TODO add framerate selection and use (is_valid_timecode_rate and nearest_valid_timecode_rate) to check/get correct fps
+# TODO use opentime.rescaled_to to get correct ranges when fps from movie != fps in UI
 
 # TODO in shots panel, allow for a different shot start (other than 101)
 # TODO run shot detection in background and update shots thumbnail/video in background
@@ -55,52 +57,63 @@ TEMP_SAVE_DIR = Path(f'c:/users/{getuser()}/Documents/Wolverine')
 
 
 class ShotWidget(QtWidgets.QWidget):
+    sig_range_changed = QtCore.Signal(shots.ShotData, tuple)
+    sig_shot_changed = QtCore.Signal()
 
-    def __init__(self, parent: QtWidgets.QWidget = None, shot_data: shots.ShotData = None):
+    def __init__(self, parent: QtWidgets.QWidget = None, shot_data: shots.ShotData = None) -> None:
         super().__init__(parent=parent)
 
-        self._shot_data = shot_data
+        self._shot_data: shots.ShotData = shot_data
+        self._updated_shot_data: shots.ShotData = shots.ShotData.from_dict(self._shot_data.to_dict())
+        self.__updating_ui: bool = False
         self._build_ui()
+        self.fill_values_from(self._shot_data)
+        self._connect_ui()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         self._shot_img_lb = QtWidgets.QLabel(self)
         if self._shot_data.thumbnail:
             self._shot_img_lb.setPixmap(QtGui.QIcon(self._shot_data.thumbnail.as_posix()).pixmap(80, 80))
 
-        self._shot_name_lb = QtWidgets.QLabel(f'SH{(self._shot_data.index * 10):03d}')
+        self._shot_name_lb = QtWidgets.QLabel(self._shot_data.name)
+        self._shot_enabled_cb = QtWidgets.QCheckBox('Enabled')
+        self._shot_enabled_cb.setChecked(self._shot_data.enabled)
         self._start_sp = QtWidgets.QSpinBox()
-        self._start_sp.wheelEvent = lambda event: None
-        self._start_sp.setRange(0, ONE_BILLION)
-        self._start_sp.setValue(self._shot_data.start_frame)
         self._end_sp = QtWidgets.QSpinBox()
-        self._end_sp.wheelEvent = lambda event: None
-        self._end_sp.setRange(0, ONE_BILLION)
-        self._end_sp.setValue(self._shot_data.end_frame)
+        self._update_shot_pb = QtWidgets.QPushButton('R')
+        self._update_shot_pb.setEnabled(False)
 
         self._new_start_sp = QtWidgets.QSpinBox()
-        self._new_start_sp.setRange(0, ONE_BILLION)
-        self._new_start_sp.setValue(self._shot_data.new_start)
-        self._new_start_sp.setEnabled(False)
-        self._new_end_sp = QtWidgets.QSpinBox()
-        self._new_end_sp.setRange(0, ONE_BILLION)
-        self._new_end_sp.setValue(self._shot_data.new_end)
-        self._new_end_sp.setEnabled(False)
         self._duration_sp = QtWidgets.QSpinBox()
-        self._duration_sp.setRange(0, ONE_BILLION)
-        self._duration_sp.setValue(self._shot_data.duration)
-        self._duration_sp.setEnabled(False)
+        self._new_end_sp = QtWidgets.QSpinBox()
+
+        for widget in [self._start_sp, self._end_sp, self._duration_sp, self._new_start_sp, self._new_end_sp]:
+            widget.wheelEvent = lambda event: None
+            widget.setRange(0, ONE_BILLION)
+        self._start_sp.setRange(1, ONE_BILLION)
+        self._end_sp.setRange(2, ONE_BILLION)
+
+        header_lay = QtWidgets.QHBoxLayout()
+        header_lay.addWidget(self._shot_name_lb)
+        header_lay.addWidget(self._shot_enabled_cb)
 
         range_lay = QtWidgets.QHBoxLayout()
+        range_lay.addWidget(QtWidgets.QLabel('S'))
         range_lay.addWidget(self._start_sp)
+        range_lay.addWidget(QtWidgets.QLabel('E'))
         range_lay.addWidget(self._end_sp)
+        range_lay.addWidget(self._update_shot_pb)
 
         range_info_lay = QtWidgets.QHBoxLayout()
+        range_info_lay.addWidget(QtWidgets.QLabel('NS'))
         range_info_lay.addWidget(self._new_start_sp)
-        range_info_lay.addWidget(self._new_end_sp)
+        range_info_lay.addWidget(QtWidgets.QLabel('D'))
         range_info_lay.addWidget(self._duration_sp)
+        range_info_lay.addWidget(QtWidgets.QLabel('NE'))
+        range_info_lay.addWidget(self._new_end_sp)
 
         data_lay = QtWidgets.QVBoxLayout()
-        data_lay.addWidget(self._shot_name_lb)
+        data_lay.addLayout(header_lay)
         data_lay.addLayout(range_lay)
         data_lay.addLayout(range_info_lay)
 
@@ -109,8 +122,69 @@ class ShotWidget(QtWidgets.QWidget):
         lay.addLayout(data_lay)
         self.setLayout(lay)
 
+    def _connect_ui(self) -> None:
+        self._shot_enabled_cb.stateChanged.connect(self._toggle_enabled)
+        self._update_shot_pb.clicked.connect(self.save_changes)
+        self._start_sp.valueChanged.connect(lambda x: self._range_changed('start'))
+        self._end_sp.valueChanged.connect(lambda x: self._range_changed('end'))
+        self._duration_sp.valueChanged.connect(lambda x: self._range_changed('duration'))
+        self._new_start_sp.valueChanged.connect(lambda x: self._range_changed('new_start'))
+        self._new_end_sp.valueChanged.connect(lambda x: self._range_changed('new_end'))
+
+    def fill_values_from(self, shot_data: shots.ShotData | None = None):
+        shot_data = shot_data or self._shot_data
+
+        self.__updating_ui = True
+        self._start_sp.setValue(shot_data.start_frame)
+        self._end_sp.setValue(shot_data.end_frame)
+        self._new_start_sp.setValue(shot_data.new_start)
+        self._duration_sp.setValue(shot_data.duration)
+        self._new_end_sp.setValue(shot_data.new_end)
+        self.__updating_ui = False
+
+    def save_changes(self) -> None:
+        prev_range = (self._shot_data.start_frame, self._shot_data.end_frame)
+        self._shot_data.range = self._updated_shot_data.range
+        self._shot_data.new_start = self._updated_shot_data.new_start
+        self.sig_range_changed.emit(self._shot_data, prev_range)
+
+    def _toggle_enabled(self):
+        self._shot_data.enabled = self._shot_enabled_cb.isChecked()
+        self._updated_shot_data.enabled = self._shot_enabled_cb.isChecked()
+        self.sig_shot_changed.emit()
+
+    def _range_changed(self, op: str) -> None:
+        if self.__updating_ui:
+            return
+        current_range = opentime.TimeRange(
+            start_time=self._updated_shot_data.range.start_time,
+            duration=self._updated_shot_data.range.duration
+        )
+        if op == 'start':
+            self._updated_shot_data.start_frame = self._start_sp.value()
+        if op == 'end':
+            self._updated_shot_data.end_frame = self._end_sp.value()
+        if op == 'duration':
+            self._updated_shot_data.duration = self._duration_sp.value()
+        if op == 'new_start':
+            self._updated_shot_data.new_start = self._new_start_sp.value()
+            self._shot_data.new_start = self._new_start_sp.value()
+        if op == 'new_end':
+            self._updated_shot_data.new_end = self._new_end_sp.value()
+
+        up_to_date = (self._shot_data.range == self._updated_shot_data.range)
+        self._shot_name_lb.setText(self._shot_data.name + ('*' if not up_to_date else ''))
+        self._update_shot_pb.setEnabled(not up_to_date)
+
+        if self._updated_shot_data.range == current_range:
+            return
+
+        self.fill_values_from(self._updated_shot_data)
+
 
 class ShotListWidget(QtWidgets.QWidget):
+    sig_range_changed = QtCore.Signal(shots.ShotData, tuple)
+    sig_shots_changed = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget = None):
         super().__init__(parent=parent)
@@ -118,25 +192,56 @@ class ShotListWidget(QtWidgets.QWidget):
         self._shot_list = []
         self.shot_widgets = []
         self._build_ui()
+        self._connect_ui()
 
     def _build_ui(self):
+        self._shots_prefix_le = QtWidgets.QLineEdit()
+
+        self._shots_start_sp = QtWidgets.QSpinBox()
+        self._shots_start_sp.wheelEvent = lambda event: None
+        self._shots_start_sp.setRange(0, ONE_BILLION)
+        self._shots_start_sp.setValue(101)
+
         self._shot_list_lw = QtWidgets.QWidget()
-        cam_list_lay = QtWidgets.QVBoxLayout()
-        self._shot_list_lw.setLayout(cam_list_lay)
+        self._shot_list_lw.setLayout(QtWidgets.QVBoxLayout())
 
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setWidget(self._shot_list_lw)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
+        suffix_lay = QtWidgets.QHBoxLayout()
+        suffix_lay.addWidget(QtWidgets.QLabel('Shots Suffix :'))
+        suffix_lay.addWidget(self._shots_prefix_le)
+
+        starts_lay = QtWidgets.QHBoxLayout()
+        starts_lay.addWidget(QtWidgets.QLabel('Shots Start :'))
+        starts_lay.addWidget(self._shots_start_sp)
+
         layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(suffix_lay)
+        layout.addLayout(starts_lay)
         layout.addWidget(self._scroll)
         layout.setSpacing(0)
         layout.setMargin(0)
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         self.setMinimumWidth(450)
-        # self.setMaximumWidth(450)
+
+    def _connect_ui(self):
+        self._shots_prefix_le.editingFinished.connect(self._update_shot_names)
+        self._shots_start_sp.valueChanged.connect(self._update_shots_start)
+
+    def _update_shot_names(self):
+        prefix = self._shots_prefix_le.text()
+        for shot_data in self._shot_list:
+            shot_data.prefix = prefix
+        self.sig_shots_changed.emit()
+
+    def _update_shots_start(self, new_start: int):
+        for shot_data in self._shot_list:
+            shot_data.new_start = new_start
+        self.sig_shots_changed.emit()
 
     def refresh_shots(self, shot_list: List[shots.ShotData]):
         """
@@ -154,9 +259,11 @@ class ShotListWidget(QtWidgets.QWidget):
             if child.widget():
                 child.widget().deleteLater()
         for shot_data in sorted(self._shot_list, key=lambda x: str(f'{x.index:06d}')):
-            cam_widget = ShotWidget(parent=self, shot_data=shot_data)
-            self.shot_widgets.append(cam_widget)
-            self._shot_list_lw.layout().addWidget(cam_widget)
+            shot_widget = ShotWidget(parent=self, shot_data=shot_data)
+            shot_widget.sig_range_changed.connect(self.sig_range_changed)
+            shot_widget.sig_shot_changed.connect(self.sig_shots_changed)
+            self.shot_widgets.append(shot_widget)
+            self._shot_list_lw.layout().addWidget(shot_widget)
         self._shot_list_lw.layout().addItem(QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Minimum,
                                                                   QtWidgets.QSizePolicy.Expanding))
         return self.shot_widgets
@@ -176,7 +283,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._build_ui()
         self._connect_ui()
 
-        self._player = self.__init_player()
+        self._player: mpv.MPV = self.__init_player()
         self.load_config()
 
         # from fcpxml.fcp import FCPXML
@@ -210,6 +317,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._threshold_sp.setValue(80)
         self._process_pb = QtWidgets.QPushButton('Process')
         self._process_pb.setEnabled(False)
+
         self._screen = QtWidgets.QFrame()
         self._screen.setMinimumSize(450, 450)
         self._loop_pb = QtWidgets.QPushButton('L')
@@ -227,6 +335,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._volume_sl.setRange(0, 100)
         self._volume_sl.setValue(100)
         self._fullscreen_pb = QtWidgets.QPushButton('F')
+
         self._timeline_sl = ClickableSlider(QtCore.Qt.Horizontal)
         self._timeline_sl.setEnabled(False)
         self._timeline_sl.setVisible(False)
@@ -236,11 +345,15 @@ class WolverineUI(QtWidgets.QDialog):
         self._current_frame_sp = QtWidgets.QSpinBox()
         self._current_frame_sp.wheelEvent = lambda event: None
         self._current_frame_sp.setEnabled(False)
+        self._add_marker_pb = QtWidgets.QPushButton('Add Marker')
+        self._remove_marker_pb = QtWidgets.QPushButton('Remove Marker')
         self._marker_timeline_sl = ClickableRangeSlider(QtCore.Qt.Orientation.Horizontal)
         self._marker_timeline_sl.setEnabled(False)
         self._marker_timeline_sl.setVisible(False)
+
         self._otio_view = OTIOViewWidget(parent=self)
         self._dst_dir_le = QtWidgets.QLineEdit()
+        self._dst_dir_le.setReadOnly(True)
         self._browse_dst_pb = QtWidgets.QPushButton('Browse Destination')
         self._import_pb = QtWidgets.QPushButton('Import')
         self._export_pb = QtWidgets.QPushButton('Export')
@@ -277,7 +390,9 @@ class WolverineUI(QtWidgets.QDialog):
         layout.addWidget(self._process_pb, 0, 3, 1, 1)
         layout.addWidget(self._player_widget, 1, 0, 2, 4)
         layout.addWidget(self._timeline_sl, 3, 0, 1, 3)
-        layout.addWidget(self._zoom_timeline_sl, 4, 0, 1, 3)
+        layout.addWidget(self._zoom_timeline_sl, 4, 0, 1, 1)
+        layout.addWidget(self._add_marker_pb, 4, 1, 1, 1)
+        layout.addWidget(self._remove_marker_pb, 4, 2, 1, 1)
         layout.addWidget(self._current_frame_sp, 4, 3, 1, 1)
         layout.addWidget(self._marker_timeline_sl, 5, 0, 1, 3)
         layout.addWidget(self._shots_panel_lw, 1, 4, 6, 3)
@@ -292,6 +407,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._browse_src_pb.clicked.connect(self._browse_video)
         self._src_file_le.editingFinished.connect(self._video_selected)
         self._process_pb.clicked.connect(self._process_video)
+
         self._loop_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_L))
         self._speed_sl.valueChanged.connect(self._set_player_speed)
         self._prev_shot_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_P))
@@ -303,12 +419,20 @@ class WolverineUI(QtWidgets.QDialog):
         self._mute_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_M))
         self._volume_sl.valueChanged.connect(self._set_player_volume)
         self._fullscreen_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_F))
+
         self._timeline_sl.sliderPressed.connect(lambda: self._pause_player(True))
         self._timeline_sl.sliderReleased.connect(self._timeline_seek)
         self._zoom_timeline_sl.sliderReleased.connect(lambda: self._update_timeline_focus())
         self._marker_timeline_sl.handleSelected.connect(self._timeline_seek)
+
+        self._add_marker_pb.clicked.connect(lambda: self._add_shot(self._current_frame_sp.value()))
+        self._remove_marker_pb.clicked.connect(lambda: self._remove_shot(None, self._current_frame_sp.value()))
+
         self._browse_dst_pb.clicked.connect(self._browse_output)
         self._export_pb.clicked.connect(self._export_all)
+
+        self._shots_panel_lw.sig_range_changed.connect(self._update_shot_neighbors)
+        self._shots_panel_lw.sig_shots_changed.connect(self._sort_shots)
 
         # OTIOview signals
         self._otio_view.timeline_widget.selection_changed.connect(self._timeline_selection_changed)
@@ -317,7 +441,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._otio_view.ruler_moved.connect(self._timeline_seek)
         self._otio_view.ruler_released.connect(self._timeline_seek)
         self._otio_view.marker_added.connect(self._add_shot)
-        self._otio_view.marker_moved.connect(self._update_shot)
+        self._otio_view.marker_moved.connect(self._update_shot_from_marker)
         self._otio_view.marker_removed.connect(self._remove_shot)
 
     def eventFilter(self, source, event):
@@ -341,7 +465,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._player_controls(event.key())
         # self.accept()
 
-    def __init_player(self):
+    def __init_player(self) -> mpv.MPV:
         # set mpv player and time observer callback
         player = mpv.MPV(wid=str(int(self._screen.winId())), keep_open='yes', framedrop='no')
 
@@ -361,8 +485,8 @@ class WolverineUI(QtWidgets.QDialog):
                                                               file_filter)
         self._video_selected(video_path)
 
-    def _video_selected(self, video_path: Union[str, Path] = None):
-        video_path = video_path or self._src_file_le.text()
+    def _video_selected(self, video_path: Path | str | None = None):
+        video_path = Path(video_path or self._src_file_le.text())
         if not video_path:
             return
         video_path = Path(video_path)
@@ -391,7 +515,8 @@ class WolverineUI(QtWidgets.QDialog):
             return
         self._process_video(save_data=save_data)
 
-    def save_temp_data(self, video_path: Path, save_path: Path = None):
+    def save_temp_data(self, video_path: Path | str | None = None, save_path: Path | str | None = None):
+        video_path = Path(video_path or self._src_file_le.text())
         wolverine_data = {
             'source': video_path.as_posix(),
             'threshold': self._threshold_sp.value(),
@@ -401,12 +526,12 @@ class WolverineUI(QtWidgets.QDialog):
         for shot in self.shots:
             wolverine_data['shots'].append(shot.to_dict())
 
-        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'{video_path.stem}.json')
+        temp_save_path = Path(save_path or TEMP_SAVE_DIR.joinpath(f'{video_path.stem}.json'))
         temp_save_path.parent.mkdir(parents=True, exist_ok=True)
         temp_save_path.write_text(dumps(wolverine_data))
 
-    def load_config(self, save_path: Path = None):
-        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'config.json')
+    def load_config(self, save_path: Path | str | None = None):
+        temp_save_path = Path(save_path or TEMP_SAVE_DIR.joinpath(f'config.json'))
         if not temp_save_path.exists():
             return
 
@@ -415,11 +540,15 @@ class WolverineUI(QtWidgets.QDialog):
 
         if self._src_file_le.text():
             self.load_temp_data(Path(self._src_file_le.text()))
+            enable_ui = bool(self._src_file_le.text())
+            self._process_pb.setEnabled(enable_ui)
+            self._threshold_sp.setEnabled(enable_ui)
 
-    def save_config(self, video_path: Path, save_path: Path = None):
+    def save_config(self, video_path: Path | str | None = None, save_path: Path | str | None = None):
+        video_path = Path(video_path or self._src_file_le.text())
         config_data = {'last_open': video_path.as_posix()}
 
-        temp_save_path = save_path or TEMP_SAVE_DIR.joinpath(f'config.json')
+        temp_save_path = Path(save_path or TEMP_SAVE_DIR.joinpath(f'config.json'))
         temp_save_path.parent.mkdir(parents=True, exist_ok=True)
         temp_save_path.write_text(dumps(config_data))
 
@@ -465,7 +594,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._player.loadfile(video_path.as_posix())
         self._player.pause = True
 
-    def _update_otio_timeline(self, video_path: Path = None):
+    def _update_otio_timeline(self, video_path: Path | str | None = None):
         video_path = video_path or Path(self._src_file_le.text())
         # add shots to OTIO track
         track = schema.Track(
@@ -504,12 +633,13 @@ class WolverineUI(QtWidgets.QDialog):
             shot.index = i + 1
         self._update_otio_timeline()
         self._shots_panel_lw.refresh_shots(self.shots)
+        self.save_temp_data(self._src_file_le.text())
 
-    def _add_shot(self, start_frame: int, end_frame: int = -1):
+    def _add_shot(self, start_frame: int, end_frame: int | None = None):
         closest_shot = self._find_closest_shots(start_frame)
         if not closest_shot:
             return False
-        if end_frame == -1:
+        if end_frame is None:
             end_frame = closest_shot.end_frame
         if (start_frame, end_frame) == (closest_shot.start_frame, closest_shot.end_frame):
             return False
@@ -519,37 +649,28 @@ class WolverineUI(QtWidgets.QDialog):
             index=0,
             source=Path(self._src_file_le.text()),
             fps=self._probe_data.fps,
-            start_time=opentime.to_seconds(opentime.from_frames(start_frame, self._probe_data.fps)),
-            duration_time=opentime.to_seconds(opentime.from_frames(duration, self._probe_data.fps)),
-            start_frame=start_frame,
-            duration=duration
+            range=opentime.TimeRange(
+                start_time=opentime.from_frames(start_frame, self._probe_data.fps),
+                duration=opentime.from_frames(duration, self._probe_data.fps)
+            )
         )
         closest_shot.end_frame = start_frame
 
         self.shots.append(new_shot)
         self._sort_shots()
 
-    def _update_shot(self, marker: schema.Marker, new_start: int):
+    def _update_shot_from_marker(self, marker: schema.Marker, new_start: int):
         old_start = marker.marked_range.start_time.to_frames()
         if old_start == new_start:
             return False
         closest_shot = self._find_closest_shots(old_start)
         if not closest_shot:
             return False
-
-        prev_shot = [s for s in self.shots if s.end_frame == closest_shot.start_frame]
-        next_shot = [s for s in self.shots if s.start_frame == closest_shot.end_frame]
+        prev_range = (closest_shot.start_frame, closest_shot.end_frame)
         closest_shot.start_frame = new_start
-        closest_shot.duration = closest_shot.end_frame - closest_shot.start_frame
-        if prev_shot:
-            prev_shot[0].end_frame = closest_shot.start_frame
-        if next_shot:
-            next_shot[0].start_frame = closest_shot.start_frame
-            next_shot[0].duration = next_shot[0].end_frame - next_shot[0].start_frame
+        self._update_shot_neighbors(closest_shot, prev_range)
 
-        self._sort_shots()
-
-    def _remove_shot(self, marker: schema.Marker, shot_start: int):
+    def _remove_shot(self, marker: schema.Marker | None, shot_start: int):
         if marker:
             shot_start = marker.marked_range.start_time.to_frames()
         closest_shot = self._find_closest_shots(shot_start)
@@ -558,6 +679,17 @@ class WolverineUI(QtWidgets.QDialog):
             return False
         prev_shot[0].end_frame = closest_shot.end_frame
         self.shots.remove(closest_shot)
+
+        self._sort_shots()
+
+    def _update_shot_neighbors(self, shot_data: shots.ShotData, prev_range: tuple[int, int]):
+        prev_start, prev_end = prev_range
+        prev_shot = [s for s in self.shots if s != shot_data and s.end_frame == (prev_start - 1)]
+        next_shot = [s for s in self.shots if s != shot_data and s.start_frame == (prev_end + 1)]
+        if prev_shot:
+            prev_shot[0].end_frame = shot_data.start_frame - 1
+        if next_shot:
+            next_shot[0].start_frame = shot_data.end_frame + 1
 
         self._sort_shots()
 
