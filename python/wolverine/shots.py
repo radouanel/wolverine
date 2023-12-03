@@ -1,7 +1,7 @@
 from __future__ import annotations
 import subprocess
 from pathlib import Path
-from tempfile import mkdtemp
+from tempfile import gettempdir
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -26,6 +26,7 @@ class ShotData:
     ignored: bool = False
     _otio_clip: Clip = None
     _update_otio: bool = False
+    _save_dir: Path = None
 
     def __repr__(self) -> str:
         return (f'ShotData ({self.name}) [{self.start_frame}-{self.end_frame}] '
@@ -40,8 +41,6 @@ class ShotData:
     def __post_init__(self) -> None:
         if not self.thumbnail or not self.thumbnail.exists():
             self.generate_thumbnail()
-        if not self.movie or not self.movie.exists():
-            self.generate_movie()
 
     @property
     def name(self) -> str:
@@ -194,11 +193,25 @@ class ShotData:
         self._update_otio = False
         return self._otio_clip
 
+    @property
+    def save_directory(self) -> Path:
+        if self._save_dir:
+            return self._save_dir
+        temp_dir = Path(gettempdir()).joinpath(f'wolverine/{self.source.stem}')
+        if not temp_dir.exists():
+            temp_dir.mkdir(parents=True)
+        self._save_dir = temp_dir
+        return self._save_dir
+
+    @save_directory.setter
+    def save_directory(self, value: str | Path) -> None:
+        self._save_dir = Path(value)
+
     def generate_thumbnail(self) -> None:
-        thumb_out = Path(mkdtemp()).joinpath(f'{self.name}.jpg')
+        thumb_out = self.save_directory.joinpath(f'{self.name}.jpg')
         start_time = opentime.to_time_string(self.range.start_time)
 
-        command_list = ['ffmpeg -hide_banner -loglevel error',
+        command_list = ['ffmpeg -hide_banner -loglevel error -y',
                         f'-i "{self.source.as_posix()}"',
                         f'-ss {start_time} -vframes:v 1',
                         f'-fps_mode vfr "{thumb_out.as_posix()}"']
@@ -208,11 +221,11 @@ class ShotData:
         self.thumbnail = thumb_out if res else None
 
     def generate_movie(self) -> None:
-        shot_out = Path(mkdtemp()).joinpath(f'{self.name}{self.source.suffix}')
+        shot_out = self.save_directory.joinpath(f'{self.name}{self.source.suffix}')
         start_time = opentime.to_time_string(self.range.start_time)
         duration_time = opentime.to_time_string(self.range.duration)
 
-        command_list = ['ffmpeg -hide_banner -loglevel error',
+        command_list = ['ffmpeg -hide_banner -loglevel error -y',
                         f'-i "{self.source.as_posix()}"',
                         f'-ss {start_time} -t {duration_time}',
                         '-c:v copy -c:a copy -fps_mode vfr',
@@ -223,13 +236,13 @@ class ShotData:
         self.movie = shot_out if res else None
 
     def generate_audio(self) -> None:
-        shot_out = Path(mkdtemp()).joinpath(f'{self.name}.wav')
+        shot_out = self.save_directory.joinpath(f'{self.name}.wav')
         start_time = opentime.to_time_string(self.range.start_time)
         duration_time = opentime.to_time_string(self.range.duration)
 
         # https://superuser.com/questions/609740/extracting-wav-from-mp4-while-preserving-the-highest-possible-quality
         # ffmpeg -i input.mp4 -vn -acodec pcm_s16le -ar 44100 -ac 2 output.wav
-        command_list = ['ffmpeg -hide_banner -loglevel error',
+        command_list = ['ffmpeg -hide_banner -loglevel error -y',
                         f'-i "{self.source.as_posix()}"',
                         f'-ss {start_time} -t {duration_time}',
                         '-vn -acodec pcm_s16le -ar 44100 -ac 2',
@@ -278,10 +291,10 @@ class ShotData:
             start_time=opentime.from_frames(values['range']['start_time'], values['fps']),
             duration=opentime.from_frames(values['range']['duration'], values['fps']),
         )
-        if values['thumbnail']:
+        if values.get('thumbnail'):
             values['thumbnail'] = Path(values['thumbnail'])
-        if values['movie']:
+        if values.get('movie'):
             values['movie'] = Path(values['movie'])
-        if values['audio']:
+        if values.get('audio'):
             values['audio'] = Path(values['audio'])
         return ShotData(**values)

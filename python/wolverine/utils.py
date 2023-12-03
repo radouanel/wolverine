@@ -122,28 +122,28 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
     shots_data = []
     shots_dicts = [dict([kv.split('=') for kv in f'media_type={line}'.split('|')])
                    for line in str(out).strip().split('media_type=') if line and line != "b'"]
-    # pprint.pprint(shots_dicts)
-    shot_starts = []
+    shot_starts = [0]
     for shot_dict in shots_dicts:
         start_time = float(shot_dict.get('pkt_dts_time')
                            or shot_dict.get('pts_time')
                            or shot_dict.get('best_effort_timestamp_time')
                            or 0)
-        start_frame = int(shot_dict.get('coded_picture_number')
-                          or (shot_dict.get('pts', 0) / 1000)
-                          or (shot_dict.get('best_effort_timestamp', 0) / 1000)
+        start_frame = int((int(shot_dict.get('pts', 1)) / 1000)
+                          or (int(shot_dict.get('best_effort_timestamp', 1)) / 1000)
+                          or shot_dict.get('coded_picture_number')
                           or 0)
         if not start_frame and start_time:
             start_frame = opentime.from_seconds(start_time, fps).to_frames()
         shot_starts.append(start_frame)
-    for i, start_frame in enumerate(shot_starts):
-        i = int(i + 1)
+
+    for i, start_frame in enumerate(sorted(set(shot_starts))):
+        i += 1
         if i < len(shot_starts):
             next_start_frame = shot_starts[i] - 1
         else:
             next_start_frame = nb_frames
         shot_data = ShotData(
-            index=i,
+            index=(i * 10),
             fps=fps,
             source=file_path,
             range=opentime.range_from_start_end_time_inclusive(
@@ -161,11 +161,9 @@ def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):
     for shot_data in shot_list:
         if not shot_data.thumbnail or not shot_data.thumbnail.exists():
             shot_data.generate_thumbnail()
-        if not shot_data.movie or not shot_data.movie.exists():
-            shot_data.generate_movie()
-        if not shot_data.audio or not shot_data.audio.exists():
-            shot_data.generate_audio()
         copy(shot_data.thumbnail, Path(output_path).joinpath(shot_data.thumbnail.name))
+        shot_data.generate_movie()
         copy(shot_data.movie, Path(output_path).joinpath(shot_data.movie.name))
+        shot_data.generate_audio()
         copy(shot_data.audio, Path(output_path).joinpath(shot_data.audio.name))
 

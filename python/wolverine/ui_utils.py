@@ -335,6 +335,9 @@ def map_from_time_space(self, frame):
 
 @add_method(ruler_widget.Ruler)
 def move_to_frame(self, frame):
+    cur_frame = self.current_frame()
+    if cur_frame == frame:
+        return
     pos, clip_item = self.map_from_time_space(frame)
     if not pos:
         return
