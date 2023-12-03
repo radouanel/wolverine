@@ -163,6 +163,9 @@ def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):
             shot_data.generate_thumbnail()
         if not shot_data.movie or not shot_data.movie.exists():
             shot_data.generate_movie()
+        if not shot_data.audio or not shot_data.audio.exists():
+            shot_data.generate_audio()
         copy(shot_data.thumbnail, Path(output_path).joinpath(shot_data.thumbnail.name))
         copy(shot_data.movie, Path(output_path).joinpath(shot_data.movie.name))
+        copy(shot_data.audio, Path(output_path).joinpath(shot_data.audio.name))
 

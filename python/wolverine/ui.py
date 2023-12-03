@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from json import loads, dumps
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Callable
 
 import mpv
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
@@ -17,10 +20,19 @@ VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
 TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('wolverine')
 
 
-# TODO save shot_suffix in temp config and reload it
-# TODO test buttons `Add/remove Marker` which adds marker at current frame
-# TODO add export actions system
-# TODO add seer export action (create shots, set range, set thumbnail/movie)
+# TODO add ignored checkbox to shots and update index accordingly
+# TODO export audio, csv and otio (use write_to_string function) as well (maybe also edl/cmx_3600 and xml/fcp_xml)
+# TODO add batch to open wolverine more easily
+# FIXME auto load previous config -> ignore threshold value
+# TODO save shot_prefix/start and threshold in temp config and reload it
+# FIXME issue with path containig ":" Ex: R:/SYNDRA
+# FIXME auto split shots start one frame after ffmpeg provided value
+# FIXME current frame spinbox and otio ruler sometimes don't have same value
+# TODO add QLineEdit with timecode
+# TODO add progress bar
+# TODO add icons to player buttons
+
+# TODO update current basic export actions system (make more workable with other UIs and progress bar and export action selection widget)
 
 # TODO enable add marker button only if current frame doesn't already have a marker
 # TODO enable remove marker button only if current frame has a marker
@@ -28,44 +40,45 @@ TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('w
 # TODO add click event on thumbnail, when clicked set current frame to shot start
 
 # TODO override opentimelineview's UI
-#  - function to add : marker add, marker remove, ruler move, marker move, select shot
 #  - find a way to zoom in on specific parts of the timeline
 #  - maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
 #     actual file, the other which is flattened by wolverine using (use otiotool.flatten_timeline) ?
 
-# TODO export thumbnails, movies, edl, xml, otio, excel, audio of shots as wav/mp3
 # TODO show video info in a widget (fps, frames, duration, resolution)
-# TODO show shot info in a widget for the shot at the current frame (name, sequence, frame, timecode)
+# TODO when playing select current shot in shots list, when clicking shot junp to shot start in timeline, when double clicking shot ab-loop over it
 
-# TODO add parent sequence selection
-# TODO add ignored shot option in UI
+# TODO add parent sequence selection and add clips representing sequences with different colors (add toggle sequences in timeline button too)
 # TODO add framerate selection and use (is_valid_timecode_rate and nearest_valid_timecode_rate) to check/get correct fps
 # TODO use opentime.rescaled_to to get correct ranges when fps from movie != fps in UI
 
-# TODO in shots panel, allow for a different shot start (other than 101)
 # TODO run shot detection in background and update shots thumbnail/video in background
-# TODO add progress bar
-# TODO play shot movie when hovering over thumbnail or use existing player and ab-loop over shot range
+# TODO add ab-loop over range in player
 #    use mpv command : self._player.command('ab-loop-a', shot_start_time); self._player.command('ab-loop-b', shot_end_time)
 #    or set : self._player.ab_loop_a = shot_start_time; self._player.ab_loop_b = shot_end_time
 #    or set : start/end and loop in mpv : self._player.start = shot_start_time; self._player.end = shot_end_time; self._player.loop = True
-# TODO add colors to shots/shot markers
+
+# FIXME keyboard shortcuts get overriden by dialog (make don't use QDialog)
 # TODO add unit tests
 
-# FIXME keyboard shortcuts get overriden by dialog
-# FIXME prev/next frame sometimes stuck between frames (haven't been able to reproduce this for a while)
+
+@dataclass
+class ExportAction:
+    description: str
+    func: Callable
 
 
-class ShotWidget(QtWidgets.QWidget):
+class ShotWidget(QtWidgets.QFrame):
     sig_range_changed = QtCore.Signal(shots.ShotData, tuple)
     sig_shot_changed = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget = None, shot_data: shots.ShotData = None) -> None:
         super().__init__(parent=parent)
+        self.setObjectName('ShotWidget')
 
         self._shot_data: shots.ShotData = shot_data
         self._updated_shot_data: shots.ShotData = shots.ShotData.from_dict(self._shot_data.to_dict())
         self.__updating_ui: bool = False
+
         self._build_ui()
         self.fill_values_from(self._shot_data)
         self._connect_ui()
@@ -121,6 +134,8 @@ class ShotWidget(QtWidgets.QWidget):
         lay.addWidget(self._shot_img_lb)
         lay.addLayout(data_lay)
         self.setLayout(lay)
+
+        self.setStyleSheet('#ShotWidget {border: 1px solid black;}')
 
     def _connect_ui(self) -> None:
         self._shot_enabled_cb.stateChanged.connect(self._toggle_enabled)
@@ -210,16 +225,16 @@ class ShotListWidget(QtWidgets.QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
-        suffix_lay = QtWidgets.QHBoxLayout()
-        suffix_lay.addWidget(QtWidgets.QLabel('Shots Suffix :'))
-        suffix_lay.addWidget(self._shots_prefix_le)
+        prefix_lay = QtWidgets.QHBoxLayout()
+        prefix_lay.addWidget(QtWidgets.QLabel('Shots Prefix :'))
+        prefix_lay.addWidget(self._shots_prefix_le)
 
         starts_lay = QtWidgets.QHBoxLayout()
         starts_lay.addWidget(QtWidgets.QLabel('Shots Start :'))
         starts_lay.addWidget(self._shots_start_sp)
 
         layout = QtWidgets.QVBoxLayout()
-        layout.addLayout(suffix_lay)
+        layout.addLayout(prefix_lay)
         layout.addLayout(starts_lay)
         layout.addWidget(self._scroll)
         layout.setSpacing(0)
@@ -231,6 +246,14 @@ class ShotListWidget(QtWidgets.QWidget):
     def _connect_ui(self):
         self._shots_prefix_le.editingFinished.connect(self._update_shot_names)
         self._shots_start_sp.valueChanged.connect(self._update_shots_start)
+
+    @property
+    def prefix(self):
+        return self._shots_prefix_le.text()
+
+    @property
+    def start(self):
+        return self._shots_start_sp.value()
 
     def _update_shot_names(self):
         prefix = self._shots_prefix_le.text()
@@ -279,6 +302,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._last_pause_state: bool = True
         self._probe_data: Union[utils.FFProbe, None] = None
         self.shots: List[shots.ShotData] = []
+        self._export_actions: list[ExportAction] = []
 
         self._build_ui()
         self._connect_ui()
@@ -309,7 +333,7 @@ class WolverineUI(QtWidgets.QDialog):
     def _build_ui(self):
         self._src_file_le = QtWidgets.QLineEdit()
         self._src_file_le.setReadOnly(True)
-        self._browse_src_pb = QtWidgets.QPushButton('Select Map File')
+        self._browse_src_pb = QtWidgets.QPushButton('Select File')
         self._threshold_sp = QtWidgets.QSpinBox()
         self._threshold_sp.wheelEvent = lambda event: None
         self._threshold_sp.setEnabled(False)
@@ -356,6 +380,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._dst_dir_le.setReadOnly(True)
         self._browse_dst_pb = QtWidgets.QPushButton('Browse Destination')
         self._import_pb = QtWidgets.QPushButton('Import')
+        self._import_pb.setVisible(False)
         self._export_pb = QtWidgets.QPushButton('Export')
         self._shots_panel_lw = ShotListWidget()
 
@@ -420,10 +445,11 @@ class WolverineUI(QtWidgets.QDialog):
         self._volume_sl.valueChanged.connect(self._set_player_volume)
         self._fullscreen_pb.clicked.connect(lambda: self._player_controls(QtCore.Qt.Key_F))
 
-        self._timeline_sl.sliderPressed.connect(lambda: self._pause_player(True))
-        self._timeline_sl.sliderReleased.connect(self._timeline_seek)
+        # self._timeline_sl.sliderPressed.connect(lambda: self._pause_player(True))
+        # self._timeline_sl.sliderReleased.connect(self._timeline_seek)
+        # self._marker_timeline_sl.handleSelected.connect(self._timeline_seek)
         self._zoom_timeline_sl.sliderReleased.connect(lambda: self._update_timeline_focus())
-        self._marker_timeline_sl.handleSelected.connect(self._timeline_seek)
+        self._current_frame_sp.valueChanged.connect(self._timeline_seek)
 
         self._add_marker_pb.clicked.connect(lambda: self._add_shot(self._current_frame_sp.value()))
         self._remove_marker_pb.clicked.connect(lambda: self._remove_shot(None, self._current_frame_sp.value()))
@@ -521,6 +547,8 @@ class WolverineUI(QtWidgets.QDialog):
             'source': video_path.as_posix(),
             'threshold': self._threshold_sp.value(),
             'probe_data': self._probe_data.to_dict(),
+            'prefix': self._shots_panel_lw.prefix,
+            'shot_start': self._shots_panel_lw.start,
             'shots': []
         }
         for shot in self.shots:
@@ -564,6 +592,7 @@ class WolverineUI(QtWidgets.QDialog):
         else:
             self._probe_data = utils.FFProbe.from_dict(save_data['probe_data'])
             for shot_data in save_data.get('shots', []):
+                print('shot_data ==> ', shot_data)
                 shot_data = shots.ShotData.from_dict(shot_data)
                 self.shots.append(shot_data)
 
@@ -674,7 +703,7 @@ class WolverineUI(QtWidgets.QDialog):
         if marker:
             shot_start = marker.marked_range.start_time.to_frames()
         closest_shot = self._find_closest_shots(shot_start)
-        prev_shot = [s for s in self.shots if s.end_frame == closest_shot.start_frame]
+        prev_shot = [s for s in self.shots if s.end_frame == (closest_shot.start_frame - 1)]
         if not prev_shot:
             return False
         prev_shot[0].end_frame = closest_shot.end_frame
@@ -705,6 +734,11 @@ class WolverineUI(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, 'Output Error', 'No Output Directory Selected !')
             return
         utils.export_shots(self._dst_dir_le.text(), self.shots)
+        for export_action in self._export_actions:
+            export_action.func(self._dst_dir_le.text(), self.shots)
+
+    def add_export_action(self, export_action: ExportAction):
+        self._export_actions.append(export_action)
 
     def _update_timeline_focus(self, new_range: Tuple[int, int] = None):
         start, end = new_range or self._zoom_timeline_sl.value()
@@ -721,14 +755,16 @@ class WolverineUI(QtWidgets.QDialog):
             return
         current_frame = opentime.to_frames(opentime.from_seconds(value, self._probe_data.fps))
         self._timeline_sl.setValue(int(current_frame))
-        self._current_frame_sp.setValue(int(current_frame))
         self._otio_view.ruler.move_to_frame(current_frame)
+        self._current_frame_sp.blockSignals(True)
+        self._current_frame_sp.setValue(int(current_frame))
+        self._current_frame_sp.blockSignals(False)
         QtWidgets.QApplication.processEvents()
 
     def _timeline_seek(self, value: Union[int, float] = None):
         if not self._probe_data:
             return
-        value = value if isinstance(value, (int, float)) else self._timeline_sl.value()
+        value = value if isinstance(value, (int, float)) else self._current_frame_sp.value()
         value_seconds = opentime.to_seconds(opentime.from_frames(value, self._probe_data.fps))
         self._player.seek(value_seconds, reference='absolute+exact')
         self._player.pause = self._last_pause_state
@@ -783,6 +819,37 @@ class WolverineUI(QtWidgets.QDialog):
             # self._player.fullscreen = not self._player.fullscreen  # not working
 
 
+def export_seer(dest_path: Path, shot_list: list[shots.ShotData]):
+    import seer
+    from overseer.utils import seer_tools
+    from brio import media
+    from seer_ui.dialogs.project_picker import ProjectDialog
+
+    proj_diag = ProjectDialog()
+    proj_diag.move(QtGui.QCursor.pos())
+    if not proj_diag.exec_():
+        return
+
+    project = proj_diag.chosen_project()
+    project = seer.get_project(project.lower())
+    shots_grp = project.group('shots')
+
+    output_path = Path(dest_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    for shot_data in shot_list:
+        if not shot_data.enabled or shot_data.ignored:
+            continue
+        try:
+            wu = project.workunit(shot_data.name)
+        except Exception:
+            wu = seer_tools.create_workunit(project, shot_data.name, 'shot', shots_grp)
+        wu.set_setting('frame_range', (shot_data.new_start, shot_data.new_end), overwrite=True)
+
+        media.set_thumbnail(shot_data.thumbnail.as_posix(), wu)
+        media.set_preview(shot_data.movie.as_posix(), wu)
+
+
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     ui = WolverineUI()
@@ -790,6 +857,9 @@ if __name__ == '__main__':
     ui.setWindowFlag(QtCore.Qt.WindowMaximizeButtonHint, True)
     ui.show()
     ui.raise_()
+
+    seer_export_action = ExportAction(description='Seer Export', func=export_seer)
+    ui.add_export_action(seer_export_action)
 
     sys.exit(app.exec_())
 

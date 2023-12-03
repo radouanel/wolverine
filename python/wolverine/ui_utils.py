@@ -339,5 +339,6 @@ def move_to_frame(self, frame):
     if not pos:
         return
     self.setPos(pos)
-    self.update_frame(clip_item.trimmed_range())
+    # self.update_frame(clip_item.trimmed_range())
+    self.update_frame()
 

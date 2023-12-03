@@ -20,8 +20,10 @@ class ShotData:
     new_start: int = 101
     thumbnail: Path = None
     movie: Path = None
-    enabled: bool = True
+    audio: Path = None
     prefix: str = ''
+    enabled: bool = True
+    ignored: bool = False
     _otio_clip: Clip = None
     _update_otio: bool = False
 
@@ -44,7 +46,8 @@ class ShotData:
     @property
     def name(self) -> str:
         prefix = '' if not self.prefix else f'{self.prefix.upper()}_'
-        return f'{prefix}SH{(self.index * 10):03d}'
+        ignored = '' if not self.ignored else '_IGNORED'
+        return f'{prefix}SH{self.index:03d}{ignored}'
 
     @property
     def start_frame(self) -> int:
@@ -144,8 +147,9 @@ class ShotData:
             return self._otio_clip
         self._otio_clip = Clip()
         self._otio_clip.name = self.name
+        self._otio_clip.metadata['name'] = self.name
         self._otio_clip.source_range = self.range
-        self._otio_clip.enabled = self.enabled
+        self._otio_clip.enabled = self.enabled and not self.ignored
 
         # add marker at start
         otio_marker = Marker(name=self.name)
@@ -218,6 +222,23 @@ class ShotData:
         res = self._generate_media(' '.join(command_list), shot_out)
         self.movie = shot_out if res else None
 
+    def generate_audio(self) -> None:
+        shot_out = Path(mkdtemp()).joinpath(f'{self.name}.wav')
+        start_time = opentime.to_time_string(self.range.start_time)
+        duration_time = opentime.to_time_string(self.range.duration)
+
+        # https://superuser.com/questions/609740/extracting-wav-from-mp4-while-preserving-the-highest-possible-quality
+        # ffmpeg -i input.mp4 -vn -acodec pcm_s16le -ar 44100 -ac 2 output.wav
+        command_list = ['ffmpeg -hide_banner -loglevel error',
+                        f'-i "{self.source.as_posix()}"',
+                        f'-ss {start_time} -t {duration_time}',
+                        '-vn -acodec pcm_s16le -ar 44100 -ac 2',
+                        '-fps_mode vfr',
+                        f'{shot_out.as_posix()}']
+
+        res = self._generate_media(' '.join(command_list), shot_out)
+        self.audio = shot_out if res else None
+
     def _generate_media(self, command: str, output_path: Path) -> bool:
         if not self.source.exists() or self.source.stat().st_size == 0:
             log.critical('No source specified or source doesn\'t exist or is empty at : ({self.source})')
@@ -261,4 +282,6 @@ class ShotData:
             values['thumbnail'] = Path(values['thumbnail'])
         if values['movie']:
             values['movie'] = Path(values['movie'])
+        if values['audio']:
+            values['audio'] = Path(values['audio'])
         return ShotData(**values)
