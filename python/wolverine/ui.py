@@ -8,8 +8,8 @@ from json import loads, dumps
 from typing import Union, List, Tuple, Dict, Callable
 
 import mpv
-from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
 from superqt import QLabeledRangeSlider, QLabeledSlider
+from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
 from opentimelineio import opentime, schema, adapters
 
 from wolverine import log
@@ -21,14 +21,15 @@ VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
 TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('wolverine')
 
 
-# TODO add batch to open wolverine more easily
 # FIXME current frame spinbox and otio ruler sometimes don't have same value
 # FIXME issue with path containig ":" Ex: R:/SYNDRA
 # TODO add log file
+# TODO make sur shots aren't duplicated
 
 # TODO add progress bar
 # TODO add icons to player buttons
 # TODO test with an actual edit file and check if metadata is still present when re-exported from premiere/afterfx
+# TODO add .otio/.edl/.xml import option as well
 
 # TODO override opentimelineview's UI
 #  - find a way to zoom in on specific parts of the timeline
@@ -118,6 +119,7 @@ class ShotWidget(QtWidgets.QFrame):
         for widget in [self._start_sp, self._end_sp, self._duration_sp, self._new_start_sp, self._new_end_sp]:
             widget.wheelEvent = lambda event: None
             widget.setRange(0, ONE_BILLION)
+        # self._start_sp.setRange(1, ONE_BILLION)
         self._end_sp.setRange(1, ONE_BILLION)
 
         header_lay = QtWidgets.QHBoxLayout()
@@ -632,10 +634,11 @@ class WolverineUI(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, 'Detection Error', 'Could not detect any shots in provided video !')
             return
 
-        self.wirte_auto_save(video_path)
+        self.sort_shots()
         self._update_otio_timeline()
+        self.wirte_auto_save(video_path)
 
-        frame_range = (1, self._probe_data.frames)
+        frame_range = (0, self._probe_data.frames)
         self._zoom_timeline_sl.blockSignals(True)
         self._zoom_timeline_sl.setTickInterval(1)
         self._zoom_timeline_sl.setRange(*frame_range)
@@ -673,7 +676,7 @@ class WolverineUI(QtWidgets.QDialog):
         self.timeline.tracks = stack
         self.timeline.metadata['source'] = video_path.as_posix()
         self._otio_view.load_timeline(self.timeline)
-        self._otio_view.ruler.move_to_frame(self._current_frame_sp.value() or 1)
+        self._otio_view.ruler.move_to_frame(self._current_frame_sp.value() or 0)
 
     def _find_closest_shots(self, frame: int) -> shots.ShotData:
         closest_shot = None
@@ -686,7 +689,27 @@ class WolverineUI(QtWidgets.QDialog):
         return closest_shot
 
     def sort_shots(self):
+        if not self.shots:
+            return
+
         self.shots = sorted(self.shots, key=lambda x: x.start_frame)
+        # check if first shot starts at 0
+        if self.shots[0].start_frame != 0:
+            cur_first = self.shots[0]
+            new_first = shots.ShotData(
+                index=0,
+                fps=cur_first.fps,
+                source=cur_first.source,
+                range=opentime.range_from_start_end_time_inclusive(
+                    start_time=opentime.from_frames(0, cur_first.fps),
+                    end_time_inclusive=opentime.from_frames((cur_first.start_frame - 1), cur_first.fps),
+                ),
+                ignored=True,
+                enabled=False
+            )
+            new_first.generate_thumbnail()
+            self.shots.insert(0, new_first)
+        # reset shot indices
         index = 0
         for shot in self.shots:
             if shot.ignored:
@@ -694,6 +717,7 @@ class WolverineUI(QtWidgets.QDialog):
                 continue
             index += 1
             shot.index = index * 10
+        # update UI and timeline and save in temp files
         self._update_otio_timeline()
         self._shots_panel_lw.refresh_shots(self.shots)
         self.wirte_auto_save(self._src_file_le.text())
