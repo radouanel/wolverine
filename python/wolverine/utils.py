@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import pprint
 import subprocess
@@ -104,11 +106,12 @@ def probe_file(file_path, print_stats=False):
     return res
 
 
-def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
+def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detection_threshold: int = 20) -> list[ShotData]:
     file_path = Path(file_path)
+    clean_path = file_path.as_posix().replace(':', '\\\\:')
     video_cmd = [
         'ffprobe -loglevel quiet -show_frames -of compact=p=0 -f lavfi',
-        f'"movie={file_path.as_posix()},select=\'gt(scene\,{(float(detection_threshold)/100)})\'"'
+        f'"movie={clean_path},select=\'gt(scene\,{(float(detection_threshold)/100)})\'"'
     ]
     log.debug(f'Running Shot Detection Command : {" ".join(video_cmd)}')
 
@@ -117,9 +120,9 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
     except subprocess.CalledProcessError as e:
         log.critical(f'Could not probe file ({file_path})')
         log.critical(e)
+        yield 0
         return
 
-    shots_data = []
     shots_dicts = [dict([kv.split('=') for kv in f'media_type={line}'.split('|')])
                    for line in str(out).strip().split('media_type=') if line and line != "b'"]
     shot_starts = [0]
@@ -136,7 +139,11 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
             start_frame = opentime.from_seconds(start_time, fps).to_frames()
         shot_starts.append(start_frame)
 
-    for i, start_frame in enumerate(sorted(set(shot_starts))):
+    shots_starts = sorted(set(shot_starts))
+    yield len(shots_starts)
+
+    # shots_data = []
+    for i, start_frame in enumerate(shots_starts):
         i += 1
         if i < len(shot_starts):
             next_start_frame = shot_starts[i] - 1
@@ -151,8 +158,9 @@ def probe_file_shots(file_path, fps, nb_frames, detection_threshold=20):
                 end_time_inclusive=opentime.from_frames(next_start_frame, fps),
             )
         )
-        shots_data.append(shot_data)
-    return shots_data
+        # shots_data.append(shot_data)
+        yield shot_data
+    # return shots_data
 
 
 def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):

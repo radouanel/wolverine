@@ -1,4 +1,6 @@
+from __future__ import annotations
 
+from pathlib import Path
 from math import ceil, floor
 
 from qt_py_tools.Qt import QtWidgets, QtCore, QtGui
@@ -9,8 +11,19 @@ from opentimelineio import schema, adapters, media_linker
 from opentimelineview import settings, timeline_widget, track_widgets, ruler_widget
 from opentimelineview.console import TimelineWidgetItem
 
+from wolverine import get_package_root
+
 
 ONE_BILLION: int = 10**9
+_icon_cache: dict[str: QtGui.QIcon] = {}
+
+
+def get_icon(icon_name: str) -> QtGui.QIcon:
+    full_path = Path(f'{get_package_root()}/resources/icons/{icon_name}').as_posix()
+    if full_path not in _icon_cache:
+        _icon_cache[full_path] = QtGui.QIcon(full_path)
+
+    return _icon_cache[full_path]
 
 
 def pixel_pos_to_range_val(widget: QtWidgets.QWidget, pos: int):

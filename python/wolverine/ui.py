@@ -15,27 +15,31 @@ from opentimelineio import opentime, schema, adapters
 from wolverine import log
 from wolverine import shots
 from wolverine import utils
-from wolverine.ui_utils import ONE_BILLION, OTIOViewWidget
+from wolverine.ui_utils import ONE_BILLION, get_icon, OTIOViewWidget
 
 VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
 TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('wolverine')
 
 
 # FIXME current frame spinbox and otio ruler sometimes don't have same value
-# FIXME issue with path containig ":" Ex: R:/SYNDRA
 # TODO add log file
 # TODO make sur shots aren't duplicated
 
 # TODO add progress bar
 # TODO add icons to player buttons
 # TODO test with an actual edit file and check if metadata is still present when re-exported from premiere/afterfx
-# TODO add .otio/.edl/.xml import option as well
+# TODO update current basic export actions system (make more workable with other UIs and progress bar and export action selection widget)
+# TODO run shot detection in background and update shots thumbnail/video in background
+# TODO add ab-loop over range in player
+#    use mpv command : self._player.command('ab-loop-a', shot_start_time); self._player.command('ab-loop-b', shot_end_time)
+#    or set : self._player.ab_loop_a = shot_start_time; self._player.ab_loop_b = shot_end_time
+#    or set : start/end and loop in mpv : self._player.start = shot_start_time; self._player.end = shot_end_time; self._player.loop = True
 
 # TODO override opentimelineview's UI
 #  - find a way to zoom in on specific parts of the timeline
+#  - prevent timeline from resetting zoom everytime it is updated
 #  - maybe split all external timeline files (otio, edl, etc...) into two timeline, one that corresponds to the
 #     actual file, the other which is flattened by wolverine using (use otiotool.flatten_timeline) ?
-#  - prevent timeline from resetting zoom everytime it is updated
 
 # TODO enable add marker button only if current frame doesn't already have a marker
 # TODO enable remove marker button only if current frame has a marker
@@ -44,13 +48,6 @@ TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('w
 # TODO add framerate selection and use (is_valid_timecode_rate and nearest_valid_timecode_rate) to check/get correct fps
 # TODO use opentime.rescaled_to to get correct ranges when fps from movie != fps in UI
 # TODO when playing select current shot in shots list, when clicking shot junp to shot start in timeline, when double clicking shot ab-loop over it
-
-# TODO update current basic export actions system (make more workable with other UIs and progress bar and export action selection widget)
-# TODO run shot detection in background and update shots thumbnail/video in background
-# TODO add ab-loop over range in player
-#    use mpv command : self._player.command('ab-loop-a', shot_start_time); self._player.command('ab-loop-b', shot_end_time)
-#    or set : self._player.ab_loop_a = shot_start_time; self._player.ab_loop_b = shot_end_time
-#    or set : start/end and loop in mpv : self._player.start = shot_start_time; self._player.end = shot_end_time; self._player.loop = True
 
 # FIXME keyboard shortcuts get overriden by dialog (make don't use QDialog)
 # TODO add unit tests
@@ -349,37 +346,56 @@ class WolverineUI(QtWidgets.QDialog):
         self._connect_ui()
 
         self._player: mpv.MPV = self.__init_player()
-        self.load_config()
 
     def _build_ui(self):
         self._src_file_le = QtWidgets.QLineEdit()
         self._src_file_le.setReadOnly(True)
         self._browse_src_pb = QtWidgets.QPushButton('Select File')
         self._threshold_sp = QtWidgets.QSpinBox()
+        self._threshold_sp.setToolTip('Shot Detection Threshold (1-100)')
         self._threshold_sp.wheelEvent = lambda event: None
         self._threshold_sp.setEnabled(False)
-        self._threshold_sp.setRange(0, 100)
+        self._threshold_sp.setRange(1, 100)
         self._threshold_sp.setValue(45)
         self._process_pb = QtWidgets.QPushButton('Process')
         self._process_pb.setEnabled(False)
 
         self._screen = QtWidgets.QFrame()
+        self._screen.setLayout(QtWidgets.QVBoxLayout())
         self._screen.setMinimumSize(450, 450)
-        self._loop_pb = QtWidgets.QPushButton('L')
+        self._loop_pb = QtWidgets.QPushButton()
+        self._loop_pb.setToolTip('Loop')
+        self._loop_pb.setIcon(get_icon('loop.png'))
         self._speed_sl = QLabeledSlider(QtCore.Qt.Orientation.Horizontal)
         self._speed_sl.setRange(1, 100)
         self._speed_sl.setValue(100)
-        self._prev_shot_pb = QtWidgets.QPushButton('PS')
-        self._prev_frame_pb = QtWidgets.QPushButton('PF')
-        self._stop_pb = QtWidgets.QPushButton('S')
-        self._pause_pb = QtWidgets.QPushButton('P')
-        self._next_frame_pb = QtWidgets.QPushButton('NF')
-        self._next_shot_pb = QtWidgets.QPushButton('NS')
-        self._mute_pb = QtWidgets.QPushButton('M')
+        self._prev_shot_pb = QtWidgets.QPushButton()
+        self._prev_shot_pb.setToolTip('Previous Shot')
+        self._prev_shot_pb.setIcon(get_icon('previous_shot.png'))
+        self._prev_frame_pb = QtWidgets.QPushButton()
+        self._prev_frame_pb.setToolTip('Previous Frame')
+        self._prev_frame_pb.setIcon(get_icon('previous_frame.png'))
+        self._stop_pb = QtWidgets.QPushButton()
+        self._stop_pb.setToolTip('Stop')
+        self._stop_pb.setIcon(get_icon('stop.png'))
+        self._pause_pb = QtWidgets.QPushButton()
+        self._pause_pb.setToolTip('Pause')
+        self._pause_pb.setIcon(get_icon('pause.png'))
+        self._next_frame_pb = QtWidgets.QPushButton()
+        self._next_frame_pb.setToolTip('Next Frame')
+        self._next_frame_pb.setIcon(get_icon('next_frame.png'))
+        self._next_shot_pb = QtWidgets.QPushButton()
+        self._next_shot_pb.setToolTip('Next Shot')
+        self._next_shot_pb.setIcon(get_icon('next_shot.png'))
+        self._mute_pb = QtWidgets.QPushButton()
+        self._mute_pb.setToolTip('Mute')
+        self._mute_pb.setIcon(get_icon('mute.png'))
         self._volume_sl = QLabeledSlider(QtCore.Qt.Orientation.Horizontal)
         self._volume_sl.setRange(0, 100)
         self._volume_sl.setValue(100)
-        self._fullscreen_pb = QtWidgets.QPushButton('F')
+        self._fullscreen_pb = QtWidgets.QPushButton()
+        self._fullscreen_pb.setToolTip('Fullscreen')
+        self._fullscreen_pb.setIcon(get_icon('fullscreen.png'))
 
         self._zoom_timeline_sl = QLabeledRangeSlider(QtCore.Qt.Orientation.Horizontal)
         self._zoom_timeline_sl.setEnabled(False)
@@ -403,6 +419,9 @@ class WolverineUI(QtWidgets.QDialog):
         self._import_pb = QtWidgets.QPushButton('Import')
         self._import_pb.setVisible(False)
         self._export_pb = QtWidgets.QPushButton('Export')
+        self._progress_bar = QtWidgets.QProgressBar()
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setVisible(False)
         self._shots_panel_lw = ShotListWidget()
 
         self._player_controls_w = QtWidgets.QWidget()
@@ -418,36 +437,40 @@ class WolverineUI(QtWidgets.QDialog):
         controls_lay.addWidget(self._mute_pb)
         controls_lay.addWidget(self._volume_sl)
         controls_lay.addWidget(self._fullscreen_pb)
+        controls_lay.addStretch(3)
         self._player_controls_w.setLayout(controls_lay)
         self._player_controls_w.setEnabled(False)
 
         screen_ctrl_lay = QtWidgets.QVBoxLayout()
+        self._screen.layout().addStretch(3)
         screen_ctrl_lay.addWidget(self._screen)
         screen_ctrl_lay.addWidget(self._player_controls_w)
+        screen_ctrl_lay.addStretch(3)
         self._player_widget = QtWidgets.QWidget()
         player_widget_lay = QtWidgets.QHBoxLayout(self._player_widget)
         player_widget_lay.addLayout(screen_ctrl_lay)
         player_widget_lay.addStretch(3)
 
         layout = QtWidgets.QGridLayout()
-        layout.addWidget(self._src_file_le, 0, 0, 1, 1)
-        layout.addWidget(self._browse_src_pb, 0, 1, 1, 1)
-        layout.addWidget(self._threshold_sp, 0, 2, 1, 1)
-        layout.addWidget(self._process_pb, 0, 3, 1, 1)
-        layout.addWidget(self._player_widget, 1, 0, 3, 4)
+        layout.addWidget(self._src_file_le, 0, 0, 1, 3)
+        layout.addWidget(self._browse_src_pb, 0, 3, 1, 1)
+        layout.addWidget(self._import_pb, 0, 4, 1, 1)
+        layout.addWidget(self._threshold_sp, 0, 5, 1, 1)
+        layout.addWidget(self._process_pb, 0, 6, 1, 1)
+        layout.addWidget(self._player_widget, 1, 0, 4, 4)
         layout.addWidget(self._shots_panel_lw, 1, 4, 6, 3)
-        layout.addWidget(self._zoom_timeline_sl, 4, 0, 1, 2)
+        layout.addWidget(self._zoom_timeline_sl, 5, 0, 1, 2)
         marker_lay = QtWidgets.QHBoxLayout()
         marker_lay.addWidget(self._current_timecode_le)
         marker_lay.addWidget(self._current_frame_sp)
         marker_lay.addWidget(self._add_marker_pb)
         marker_lay.addWidget(self._remove_marker_pb)
-        layout.addLayout(marker_lay, 4, 2, 1, 2)
+        layout.addLayout(marker_lay, 5, 2, 1, 2)
         layout.addWidget(self._otio_view, 6, 0, 1, 4)
-        layout.addWidget(self._export_dir_le, 7, 0, 1, 4)
-        layout.addWidget(self._browse_dst_pb, 7, 4, 1, 1)
-        layout.addWidget(self._export_pb, 7, 5, 1, 1)
-        layout.addWidget(self._import_pb, 7, 6, 1, 1)
+        layout.addWidget(self._export_dir_le, 7, 0, 1, 5)
+        layout.addWidget(self._browse_dst_pb, 7, 5, 1, 1)
+        layout.addWidget(self._export_pb, 7, 6, 1, 1)
+        layout.addWidget(self._progress_bar, 8, 0, 1, 7)
         self.setLayout(layout)
 
     def _connect_ui(self):
@@ -621,15 +644,26 @@ class WolverineUI(QtWidgets.QDialog):
             return
 
         self._probe_data = utils.probe_file(video_path)
+        self._progress_bar.setVisible(True)
+        new_data = True
         if not save_data:
-            self.shots = utils.probe_file_shots(video_path, self._probe_data.fps, self._probe_data.frames,
+            shots_data = utils.probe_file_shots(video_path, self._probe_data.fps, self._probe_data.frames,
                                                 detection_threshold=self._threshold_sp.value())
+            nb_shots = next(save_data)
+            save_data = shots_data if nb_shots else []
         else:
-            for shot_data in save_data:
+            nb_shots = len(save_data)
+            new_data = False
+
+        self._progress_bar.setRange(0, nb_shots)
+        for nb_shot, shot_data in enumerate(save_data):
+            if not new_data:
                 shot_data = shots.ShotData.from_dict(shot_data)
                 shot_data.generate_thumbnail()
-                self.shots.append(shot_data)
+            self._progress_bar.setValue(nb_shot + 1)
+            self.shots.append(shot_data)
 
+        self._progress_bar.setVisible(False)
         if not self.shots:
             QtWidgets.QMessageBox.critical(self, 'Detection Error', 'Could not detect any shots in provided video !')
             return
@@ -863,7 +897,10 @@ class WolverineUI(QtWidgets.QDialog):
         export_path = Path(self._export_dir_le.text())
         export_path.mkdir(parents=True, exist_ok=True)
 
-        for shot in self.shots:
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, len(self.shots))
+        for i, shot in enumerate(self.shots):
+            self._progress_bar.setValur(i + 1)
             shot.save_directory = export_path
             shot.generate_thumbnail()
             shot.generate_movie()
@@ -888,6 +925,7 @@ class WolverineUI(QtWidgets.QDialog):
                 log.critical(f'Export Failed: \nError: {e}\nExport Action :{export_action}')
                 export_errors += 1
 
+        self._progress_bar.setVisible(False)
         err_msg = f'\n {export_errors} errors were encountered, check logs for more details' if export_errors else ''
         QtWidgets.QMessageBox.information(self, 'Wolverine Export', f'Export done !{err_msg}')
 
@@ -897,6 +935,7 @@ class WolverineUI(QtWidgets.QDialog):
 
 def export_seer(dest_path: Path, shot_list: list[shots.ShotData]):
     import seer
+    from seer.resource import ResourceType
     from overseer.utils import seer_tools
     from brio import media
     from seer_ui.dialogs.project_picker import ProjectDialog
@@ -922,22 +961,31 @@ def export_seer(dest_path: Path, shot_list: list[shots.ShotData]):
             wu = seer_tools.create_workunit(project, shot_data.name, 'shot', shots_grp)
             seer_tools.create_entity_dirs_on_disk(wu)
         wu.set_setting('frame_range', (shot_data.new_start, shot_data.new_end), overwrite=True)
+        wu.set_setting('frame_range', (shot_data.new_start, shot_data.new_end), overwrite=True)
 
         media.set_thumbnail(shot_data.thumbnail.as_posix(), wu)
         media.set_preview(shot_data.movie.as_posix(), wu)
+        wu.set_resource('audio', {'*': shot_data.audio.as_posix()}, overwrite=True, rtype=ResourceType.FILE)
+        wu.save()
 
 
 if __name__ == '__main__':
+    import qdarktheme
     app = QtWidgets.QApplication(sys.argv)
+    # Apply the complete dark theme to your Qt App.
+    qdarktheme.setup_theme()
+
     ui = WolverineUI()
     ui.setWindowFlag(QtCore.Qt.WindowMinimizeButtonHint, True)
     ui.setWindowFlag(QtCore.Qt.WindowMaximizeButtonHint, True)
     ui.show()
     ui.raise_()
 
+    ui.load_config()
     seer_export_action = ExportAction(description='Seer Export', func=export_seer)
     ui.add_export_action(seer_export_action)
 
     sys.exit(app.exec_())
+
 
 
