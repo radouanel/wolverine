@@ -40,6 +40,7 @@ def probe_file(file_path, print_stats=False):
     ffprobe_path = 'ffprobe'
     if not which('ffprobe'):
         raise IOError('No ffprobe binary found in env !')
+
     command_list = [
             ffprobe_path,
             '-v', 'error',
@@ -60,11 +61,12 @@ def probe_file(file_path, print_stats=False):
         log.critical(f'Could not probe file ({file_path})')
         log.critical(e)
         return
+
     out = json.loads(out)
     if print_stats:
         log.debug(f'Probing raw data for ({file_path.name}) returned :')
         log.debug(pprint.pprint(out))
-
+    # parse data and video streams
     video_data = [strm for strm in out.get('streams') if strm.get('codec_type') == 'video'
                   if strm.get('codec_name', '').lower() not in ['mjpeg', 'png', 'bmp', 'gif']]
     if video_data:
@@ -72,14 +74,17 @@ def probe_file(file_path, print_stats=False):
     else:
         video_data = {}
     extra_data = out.get('format', {})
+    # determine fps
     if video_data:
         fps = float(video_data.get('r_frame_rate').split('/')[0])/float(video_data.get('r_frame_rate').split('/')[1])
     else:
         fps = 0.0
+    # determine duration
     duration_timecode = extra_data.get('duration') or video_data.get('duration', 0) or video_data.get('tags', {}).get('DURATION', 0)
     duration = 0.0
     if duration_timecode and fps:
         duration = opentime.to_seconds(opentime.from_time_string(duration_timecode, fps))
+    # determine number of frames
     frames = 0
     if video_data.get('nb_frames', 0):
         frames = int(video_data.get('nb_frames', 0))
@@ -89,20 +94,23 @@ def probe_file(file_path, print_stats=False):
         duration = frames / fps
     if not frames and fps and duration:
         frames = int((float(duration) / 60.0) * fps)
+    # determine resolution
+    resolution = None
+    if video_data.get('width') and video_data.get('height'):
+        resolution = (video_data.get('width'), video_data.get('height'))
+    # construct FFProbe dataclass
     res = {
         'index': video_data.get('index'),
         'source': file_path,
-        'resolution': None,
+        'resolution': resolution,
         'fps': fps,
         'duration': duration,
         'frames': frames
     }
-    if video_data.get('width') and video_data.get('height'):
-        res['resolution'] = (video_data.get('width'), video_data.get('height'))
-    res = FFProbe(**res)
     if print_stats:
-        log.debug(f'Probing parsed data for ({file_path.name}) is :')
+        log.debug(f'Parsed data for ({file_path.name}) is :')
         pprint.pprint(res)
+    res = FFProbe(**res)
     return res
 
 
@@ -142,7 +150,6 @@ def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detectio
     shots_starts = sorted(set(shot_starts))
     yield len(shots_starts)
 
-    # shots_data = []
     for i, start_frame in enumerate(shots_starts):
         i += 1
         if i < len(shot_starts):
@@ -158,20 +165,5 @@ def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detectio
                 end_time_inclusive=opentime.from_frames(next_start_frame, fps),
             )
         )
-        # shots_data.append(shot_data)
         yield shot_data
-    # return shots_data
-
-
-def export_shots(output_path: Union[Path, str], shot_list: List[ShotData]):
-    output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
-    for shot_data in shot_list:
-        if not shot_data.thumbnail or not shot_data.thumbnail.exists():
-            shot_data.generate_thumbnail()
-        copy(shot_data.thumbnail, Path(output_path).joinpath(shot_data.thumbnail.name))
-        shot_data.generate_movie()
-        copy(shot_data.movie, Path(output_path).joinpath(shot_data.movie.name))
-        shot_data.generate_audio()
-        copy(shot_data.audio, Path(output_path).joinpath(shot_data.audio.name))
 
