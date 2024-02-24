@@ -4,9 +4,9 @@ import json
 import pprint
 import subprocess
 from pathlib import Path
-from shutil import which, copy
+from shutil import which
 from dataclasses import dataclass, asdict
-from typing import Union, List
+from typing import Iterator
 
 from opentimelineio import opentime
 
@@ -114,7 +114,7 @@ def probe_file(file_path, print_stats=False):
     return res
 
 
-def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detection_threshold: int = 20) -> list[ShotData]:
+def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detection_threshold: int = 20) -> Iterator[ShotData]:
     file_path = Path(file_path)
     clean_path = file_path.as_posix().replace(':', '\\\\:')
     video_cmd = [
