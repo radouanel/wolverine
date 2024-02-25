@@ -357,4 +357,5 @@ def move_to_frame(self, frame):
     self.setPos(pos)
     # self.update_frame(clip_item.trimmed_range())
     self.update_frame()
+    QtWidgets.QApplication.processEvents()
 

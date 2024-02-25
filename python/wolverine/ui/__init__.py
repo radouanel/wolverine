@@ -13,7 +13,7 @@ from opentimelineio import opentime, schema, adapters
 from wolverine import log
 from wolverine import shots
 from wolverine import utils
-from wolverine.ui.ui_shots import ShotWidget, ShotListWidget
+from wolverine.ui.ui_shots import ShotWidget, ShotInfoWidget, ShotListWidget
 from wolverine.ui.export import ExportAction, ExportActionsUi
 from wolverine.ui.ui_utils import get_icon, OTIOViewWidget
 
@@ -21,6 +21,8 @@ VALID_VIDEO_EXT = ['.mov', '.mp4', '.mkv', '.avi']
 TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('wolverine')
 
 
+# FIXME ignore button not working in ShotWidget
+# TODO modify probe to skip any shots that are only one frame, make them part of the next or previous shot
 # TODO add parent sequence selection and add clips representing sequences with different colors (add toggle sequences in timeline button too)
 # TODO when playing select current shot in shots list, when clicking shot jump to shot start in timeline, when double clicking shot ab-loop over it
 # TODO run shot detection in background and update shots thumbnail/video in background
@@ -91,47 +93,47 @@ class PlayerWidget(QtWidgets.QDialog):
         self._loop_pb = QtWidgets.QPushButton()
         self._loop_pb.setToolTip('Loop')
         self._loop_pb.setIcon(get_icon('loop.png'))
-        # self._loop_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._loop_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._speed_sl = QLabeledSlider(QtCore.Qt.Orientation.Horizontal)
         self._speed_sl.setRange(1, 100)
         self._speed_sl.setValue(self._prev_volume_val)
-        # self._speed_sl.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._speed_sl.setFocusPolicy(QtCore.Qt.NoFocus)
         self._prev_shot_pb = QtWidgets.QPushButton()
         self._prev_shot_pb.setToolTip('Previous Shot')
         self._prev_shot_pb.setIcon(get_icon('previous_shot.png'))
-        # self._prev_shot_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._prev_shot_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._prev_frame_pb = QtWidgets.QPushButton()
         self._prev_frame_pb.setToolTip('Previous Frame')
         self._prev_frame_pb.setIcon(get_icon('previous_frame.png'))
-        # self._prev_frame_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._prev_frame_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._stop_pb = QtWidgets.QPushButton()
         self._stop_pb.setToolTip('Stop')
         self._stop_pb.setIcon(get_icon('stop.png'))
-        # self._stop_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._stop_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._pause_pb = QtWidgets.QPushButton()
         self._pause_pb.setToolTip('Pause')
         self._pause_pb.setIcon(get_icon('pause.png'))
-        # self._pause_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._pause_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._next_frame_pb = QtWidgets.QPushButton()
         self._next_frame_pb.setToolTip('Next Frame')
         self._next_frame_pb.setIcon(get_icon('next_frame.png'))
-        # self._next_frame_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._next_frame_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._next_shot_pb = QtWidgets.QPushButton()
         self._next_shot_pb.setToolTip('Next Shot')
         self._next_shot_pb.setIcon(get_icon('next_shot.png'))
-        # self._next_shot_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._next_shot_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._mute_pb = QtWidgets.QPushButton()
         self._mute_pb.setToolTip('Mute')
         self._mute_pb.setIcon(get_icon('mute.png'))
-        # self._mute_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._mute_pb.setFocusPolicy(QtCore.Qt.NoFocus)
         self._volume_sl = QLabeledSlider(QtCore.Qt.Orientation.Horizontal)
         self._volume_sl.setRange(0, 100)
         self._volume_sl.setValue(100)
-        # self._volume_sl.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._volume_sl.setFocusPolicy(QtCore.Qt.NoFocus)
         self._fullscreen_pb = QtWidgets.QPushButton()
         self._fullscreen_pb.setToolTip('Fullscreen')
         self._fullscreen_pb.setIcon(get_icon('fullscreen.png'))
-        # self._fullscreen_pb.setFocusPolicy(QtCore.Qt.NoFocus)
+        self._fullscreen_pb.setFocusPolicy(QtCore.Qt.NoFocus)
 
         self._player_controls_w = QtWidgets.QWidget()
         controls_lay = QtWidgets.QHBoxLayout()
@@ -155,7 +157,7 @@ class PlayerWidget(QtWidgets.QDialog):
 
         screen_ctrl_lay = QtWidgets.QVBoxLayout()
         screen_ctrl_lay.addWidget(self._screen, stretch=10)
-        screen_ctrl_lay.addWidget(self._player_controls_w, stretch=10)
+        screen_ctrl_lay.addWidget(self._player_controls_w, stretch=1)
 
         self.setLayout(screen_ctrl_lay)
 
@@ -216,9 +218,9 @@ class WolverineUI(QtWidgets.QDialog):
         super().__init__(parent=parent)
         self.setWindowTitle('Wolverine - Sequence Splitter')
 
-        self._full_screen: bool = False
         self._last_pause_state: bool = True
         self._probe_data: utils.FFProbe | None = None
+        self._cur_shot_end = 0
         self.shots: list[shots.ShotData] = []
         self.timeline = None
         self._export_actions: list[ExportAction] = []
@@ -281,13 +283,23 @@ class WolverineUI(QtWidgets.QDialog):
         self._progress_bar_msg = QtWidgets.QLabel()
         self._progress_bar_msg.setVisible(False)
         self._shots_panel_lw = ShotListWidget()
+        self._shots_panel_lw.setEnabled(False)
 
         self._player_widget = PlayerWidget()
 
-        splitter = QtWidgets.QSplitter()
-        splitter.setOrientation(QtCore.Qt.Orientation.Horizontal)
-        splitter.addWidget(self._player_widget)
-        splitter.addWidget(self._shots_panel_lw)
+        self._splitter = QtWidgets.QSplitter()
+        self._splitter.setOrientation(QtCore.Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self._player_widget)
+        self._splitter.addWidget(self._shots_panel_lw)
+
+        marker_lay = QtWidgets.QHBoxLayout()
+        marker_lay.addWidget(self._add_marker_pb)
+        marker_lay.addWidget(self._remove_marker_pb)
+        marker_lay.addWidget(QtWidgets.QLabel('Go To Frame :'))
+        marker_lay.addWidget(self._got_to_frame_sp)
+        marker_lay.addStretch(10)
+        marker_lay.addWidget(self._current_timecode_le)
+        marker_lay.addWidget(self._current_frame_sp)
 
         layout = QtWidgets.QGridLayout()
         layout.addWidget(self._src_file_le, 0, 0, 1, 3)
@@ -295,22 +307,15 @@ class WolverineUI(QtWidgets.QDialog):
         layout.addWidget(self._import_pb, 0, 4, 1, 1)
         layout.addWidget(self._threshold_sp, 0, 5, 1, 1)
         layout.addWidget(self._process_pb, 0, 6, 1, 1)
-        layout.addWidget(splitter, 1, 0, 3, 7)
-        layout.addWidget(self._zoom_timeline_sl, 5, 0, 1, 5)
-        marker_lay = QtWidgets.QHBoxLayout()
-        marker_lay.addWidget(self._current_timecode_le)
-        marker_lay.addWidget(self._current_frame_sp)
-        marker_lay.addWidget(self._add_marker_pb)
-        marker_lay.addWidget(self._remove_marker_pb)
-        marker_lay.addWidget(QtWidgets.QLabel('Go To Frame :'))
-        marker_lay.addWidget(self._got_to_frame_sp)
-        layout.addLayout(marker_lay, 5, 2, 1, 3)
-        layout.addWidget(self._otio_view, 6, 0, 1, 7)
-        layout.addWidget(self._export_dir_le, 7, 0, 1, 5)
-        layout.addWidget(self._browse_dst_pb, 7, 5, 1, 1)
-        layout.addWidget(self._export_pb, 7, 6, 1, 1)
-        layout.addWidget(self._progress_bar, 8, 0, 1, 5)
-        layout.addWidget(self._progress_bar_msg, 8, 5, 1, 2)
+        layout.addWidget(self._splitter, 1, 0, 3, 7)
+        layout.addLayout(marker_lay, 5, 0, 1, 7)
+        layout.addWidget(self._zoom_timeline_sl, 6, 0, 1, 7)
+        layout.addWidget(self._otio_view, 7, 0, 1, 7)
+        layout.addWidget(self._export_dir_le, 8, 0, 1, 5)
+        layout.addWidget(self._browse_dst_pb, 8, 5, 1, 1)
+        layout.addWidget(self._export_pb, 8, 6, 1, 1)
+        layout.addWidget(self._progress_bar, 9, 0, 1, 5)
+        layout.addWidget(self._progress_bar_msg, 9, 5, 1, 2)
         self.setLayout(layout)
 
     def _connect_ui(self):
@@ -323,7 +328,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._player_widget.sig_player_speed.connect(self._set_player_speed)
 
         self._zoom_timeline_sl.sliderReleased.connect(lambda: self._update_timeline_focus())
-        self._got_to_frame_sp.valueChanged.connect(self._timeline_seek)
+        self._got_to_frame_sp.editingFinished.connect(self._timeline_seek)
 
         self._add_marker_pb.clicked.connect(lambda: self._add_shot(self._current_frame_sp.value()))
         self._remove_marker_pb.clicked.connect(lambda: self._remove_shot(None, self._current_frame_sp.value()))
@@ -395,6 +400,8 @@ class WolverineUI(QtWidgets.QDialog):
         save_loaded = self.load_auto_save(video_path)
         # if no auto save loaded, just load the video in the payer
         if not save_loaded:
+            # TODO add reset UI, clear timeline, shots, UI values and their respective widgets
+            # self._reset_ui()
             self._load_video(video_path)
 
     def _load_video(self, video_path: Path):
@@ -427,6 +434,7 @@ class WolverineUI(QtWidgets.QDialog):
         self._current_timecode_le.setEnabled(True)
         self._add_marker_pb.setEnabled(True)
         self._remove_marker_pb.setEnabled(True)
+        self._shots_panel_lw.setEnabled(True)
 
         self._player.loadfile(video_path.as_posix())
         self._player.pause = True
@@ -541,9 +549,6 @@ class WolverineUI(QtWidgets.QDialog):
             return
 
         self.sort_shots()
-        self._update_otio_timeline()
-        self.write_auto_save(video_path)
-        self._shots_panel_lw.refresh_shots(self.shots)
 
     def _update_otio_timeline(self, video_path: Path | str | None = None):
         video_path = video_path or Path(self._src_file_le.text())
@@ -577,14 +582,6 @@ class WolverineUI(QtWidgets.QDialog):
             break
 
         return closest_shot
-
-    def _timeline_selection_changed(self, item):
-        shot_name = item.name
-        for shot_widget in self._shots_panel_lw.shot_widgets:
-            if shot_widget.name != shot_name:
-                continue
-            self._shots_panel_lw.select_shot(shot_widget)
-            break
 
     def sort_shots(self):
         if not self.shots:
@@ -688,6 +685,14 @@ class WolverineUI(QtWidgets.QDialog):
             current_time = opentime.to_timecode(opentime.from_frames(current_frame, self._probe_data.fps))
             self._current_timecode_le.setText(current_time)
 
+    def _timeline_selection_changed(self, item):
+        shot_name = item.name
+        for shot_widget in self._shots_panel_lw.shot_widgets:
+            if shot_widget.name != shot_name:
+                continue
+            self._shots_panel_lw.select_shot(shot_widget)
+            break
+
     def _time_observer(self, value: float):
         if not self._probe_data or not value:
             return
@@ -700,31 +705,35 @@ class WolverineUI(QtWidgets.QDialog):
 
         if self.shots:
             self._otio_view.ruler.move_to_frame(current_frame)
-            for shot in self.shots:
-                if not (shot.start_frame <= current_frame <= shot.end_frame):
-                    continue
-                self._shots_panel_lw.select_shot(by_name=shot.name)
-                break
+            # if self._cur_shot_end <= current_frame:
+            #     for i, shot_widget in enumerate(self._shots_panel_lw.shot_widgets):
+            #         if not (shot_widget.start <= current_frame <= shot_widget.end):
+            #             continue
+            #         self._cur_shot_end = shot_widget.end
+            #         self._shots_panel_lw.select_shot(shot_widget)
+            #         break
 
         QtWidgets.QApplication.processEvents()
 
-    def _timeline_seek(self, value: int | float = None):
+    def _timeline_seek(self, frame: int | float = None):
         if not self._probe_data:
             return
 
-        value = value if isinstance(value, (int, float)) else self._current_frame_sp.value()
-        value_seconds = opentime.to_seconds(opentime.from_frames(value, self._probe_data.fps))
+        frame = frame if isinstance(frame, (int, float)) else self._current_frame_sp.value()
+        value_seconds = opentime.to_seconds(opentime.from_frames(frame, self._probe_data.fps))
 
         if self.shots:
-            self._otio_view.ruler.move_to_frame(value)
-            for shot in self.shots:
-                if not (shot.start_frame <= value <= shot.end_frame):
+            self._otio_view.ruler.move_to_frame(frame)
+            for shot_widget in self._shots_panel_lw.shot_widgets:
+                if not (shot_widget.start <= frame <= shot_widget.end):
                     continue
-                self._shots_panel_lw.select_shot(by_name=shot.name)
+                self._cur_shot_end = shot_widget.end
+                self._shots_panel_lw.select_shot(shot_widget)
                 break
 
         self._player.seek(value_seconds, reference='absolute+exact')
         self._player.pause = self._last_pause_state
+        QtWidgets.QApplication.processEvents()
 
     def _pause_player(self, status: bool):
         self._last_pause_state = self._player.pause
@@ -763,14 +772,12 @@ class WolverineUI(QtWidgets.QDialog):
         elif key == QtCore.Qt.Key_L:
             self._player.loop = not self._player.loop
         elif key == QtCore.Qt.Key_F:
-            if self._full_screen:
-                self._player_widget.screen.showNormal()
-                # self.showNormal()
+            if self._player_widget.isFullScreen():
+                self._splitter.insertWidget(0, self._player_widget)
+                self._player_widget.showNormal()
             else:
-                self._player_widget.screen.showFullScreen()
-                # self.showFullScreen()
-            self._full_screen = not self._full_screen
-            # self._player.fullscreen = not self._player.fullscreen  # not working
+                self._player_widget.setParent(None)
+                self._player_widget.showFullScreen()
         else:
             return False
         return True
