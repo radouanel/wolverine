@@ -22,7 +22,7 @@ TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('w
 
 
 # FIXME ignore button not working in ShotWidget
-# TODO modify probe to skip any shots that are only one frame, make them part of the next or previous shot
+# TODO when selecting video, if UI already loaded and video processed and selected video is the same, skip autosave check
 # TODO add parent sequence selection and add clips representing sequences with different colors (add toggle sequences in timeline button too)
 # TODO when playing select current shot in shots list, when clicking shot jump to shot start in timeline, when double clicking shot ab-loop over it
 # TODO run shot detection in background and update shots thumbnail/video in background
@@ -69,6 +69,19 @@ TEMP_SAVE_DIR = Path(os.getenv('WOLVERINE_PREFS_PATH', Path.home())).joinpath('w
 # # edl_clips = edl.each_child()
 # edl_clip = list(edl.each_clip())
 # start, duration = edl_clip.source_range
+
+# https://www.pythonguis.com/examples/python-multimedia-player/
+# from PySide2.QtCore import QUrl
+# from PySide2.QtMultimedia import QMediaPlayer, QAudio
+# import PySide2.QtWidgets as QtWidgets
+# import sys
+#
+# app = QtWidgets.QApplication(sys.argv)  # Does all the setup work required to use Qt
+# player = QMediaPlayer()
+# player.setMedia(QUrl.fromLocalFile('Hotel California.mp3'))
+# player.setVolume(70)
+# player.play()
+# sys.exit(app.exec_())  # Stops program from exiting
 
 
 class PlayerWidget(QtWidgets.QDialog):
@@ -871,9 +884,6 @@ def open_ui():
     _window.setWindowFlag(QtCore.Qt.WindowMaximizeButtonHint, True)
     _window.show()
     _window.raise_()
-
-    # load auto-save
-    _window.load_config()
 
     return _app, _window
 

@@ -133,8 +133,8 @@ def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detectio
 
     shots_dicts = [dict([kv.split('=') for kv in f'media_type={line}'.split('|')])
                    for line in str(out).strip().split('media_type=') if line and line != "b'"]
-    shot_starts = [0]
-    for shot_dict in shots_dicts:
+    shot_starts = []
+    for i, shot_dict in enumerate(shots_dicts):
         start_time = float(shot_dict.get('pkt_dts_time')
                            or shot_dict.get('pts_time')
                            or shot_dict.get('best_effort_timestamp_time')
@@ -145,6 +145,8 @@ def probe_file_shots(file_path: str | Path, fps: float, nb_frames: int, detectio
                           or 0)
         if not start_frame and start_time:
             start_frame = opentime.from_seconds(start_time, fps).to_frames()
+        if i == 0 and start_frame != 0:
+            start_frame = 0
         shot_starts.append(start_frame)
 
     shots_starts = sorted(set(shot_starts))
